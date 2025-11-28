@@ -319,10 +319,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                                 ),
                                               ),
                                             ),
-                                            TextButton(
-                                              onPressed: _loading ? null : _sendPasswordReset,
-                                              child: const Text('Forgot password?'),
-                                            ),
+                                           
                                           ],
                                         ),
 
@@ -341,7 +338,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                             ),
                                             child: _loading
                                                 ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.2))
-                                                : Text(_isSignUpMode ? 'Create account' : 'Sign in', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                                                : Text(_isSignUpMode ? 'Sign Up' : 'Sign in', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                                           ),
                                         ),
 
@@ -361,7 +358,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                                         _error = null;
                                                       });
                                                     },
-                                              child: Text(_isSignUpMode ? 'Sign in' : 'Create account'),
+                                              child: Text(_isSignUpMode ? 'Sign in' : 'Sign Up'),
                                             ),
                                           ],
                                         ),

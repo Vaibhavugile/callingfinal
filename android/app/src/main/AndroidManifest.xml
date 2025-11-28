@@ -11,17 +11,18 @@
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
 
-    <!-- Deprecated historically but present for older platforms -->
+    <!-- Historically used for outgoing broadcast on older platforms -->
     <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- POST_NOTIFICATIONS (Android 13+) kept if you request it at runtime -->
+    <!-- Android 13+ notification permission (request at runtime) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <queries>
+        <!-- Let the system know we may observe these actions (helpful for newer package visibility) -->
         <intent>
             <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
         </intent>
@@ -58,12 +59,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Dialer candidate -->
+            <!-- Dialer candidate (makes app eligible to be default dialer) -->
             <intent-filter>
                 <action android:name="android.intent.action.DIAL" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
 
+            <!-- Deep-link for tel: calls -->
             <intent-filter>
                 <action android:name="android.intent.action.CALL" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -71,14 +73,13 @@
             </intent-filter>
         </activity>
 
-        <!-- Call tracking foreground service (CallService) -->
-        <!-- NOTE: use "phoneCall" (not "phone") for foregroundServiceType -->
+        <!-- Foreground service used by CallService (phoneCall type) -->
         <service
             android:name=".callservice.CallService"
             android:exported="false"
             android:foregroundServiceType="phoneCall" />
 
-        <!-- InCallService to receive lifecycle when app is default dialer -->
+        <!-- InCallService (receives lifecycle events when app is default dialer) -->
         <service
             android:name=".callservice.MyInCallService"
             android:exported="true"
@@ -88,7 +89,7 @@
             </intent-filter>
         </service>
 
-        <!-- CallRedirectionService for outgoing call interception on Android 10+ -->
+        <!-- CallRedirectionService (Android 10+ recommended for outgoing interception) -->
         <service
             android:name=".callservice.MyCallRedirectionService"
             android:exported="true"
@@ -98,7 +99,7 @@
             </intent-filter>
         </service>
 
-        <!-- Receivers for older Android and robustness -->
+        <!-- OUTGOING receiver for older devices / extra robustness -->
         <receiver
             android:name=".callservice.OutgoingReceiver"
             android:enabled="true"
@@ -109,6 +110,7 @@
             </intent-filter>
         </receiver>
 
+        <!-- Incoming receiver (phone state) -->
         <receiver
             android:name=".callservice.IncomingReceiver"
             android:enabled="true"
@@ -121,6 +123,7 @@
             </intent-filter>
         </receiver>
 
+        <!-- Start on boot receiver -->
         <receiver
             android:name=".callservice.BootReceiver"
             android:exported="true"

@@ -27,6 +27,8 @@ import io.flutter.plugin.common.EventChannel
 import kotlin.math.abs
 import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
+import android.app.PendingIntent
+import android.content.ComponentName
 
 class CallService : Service() {
 
@@ -55,10 +57,12 @@ class CallService : Service() {
 
         private const val NOTIF_CHANNEL_ID = "call_channel"
         private const val NOTIF_CHANNEL_NAME = "Call Tracking"
+        private const val NOTIF_ID = 1001
 
         // NEW: reuse window + active TTL to support long calls (10-15min+)
         private const val REUSE_WINDOW_MS = 120_000L            // 2 minutes fallback
         private const val ACTIVE_CALL_TTL_MS = 60 * 60 * 1000L // 1 hour active TTL
+
         /**
          * Flush any buffered pendingEvents into the current eventSink if available.
          * This helper is safe to call multiple times and handles exceptions internally.
@@ -118,7 +122,8 @@ class CallService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannelIfNeeded()
-        startForeground(1, buildNotification())
+        // start foreground with minimal static notification
+        startForeground(NOTIF_ID, buildNotification())
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         registerTelephonyCallback()
         Log.d(TAG, "✅ Service created and listening.")
@@ -351,6 +356,35 @@ class CallService : Service() {
                 .build()
 
             WorkManager.getInstance(applicationContext).enqueue(workRequest)
+
+            // Update notification for key outcomes (outgoing_start, answered, ended, missed, rejected)
+            try {
+                val outcome = (mutable["outcome"] as? String) ?: ""
+                val phone = (mutable["phoneNumber"] as? String) ?: ""
+                val dir = (mutable["direction"] as? String) ?: ""
+                when (outcome) {
+                    "outgoing_start" -> {
+                        Log.d(TAG, "Updating notification: outgoing_start for $phone")
+                        showOrUpdateCallNotification(phone, dir, "Calling…")
+                    }
+                    "answered", "answered_external", "answered_external" -> {
+                        Log.d(TAG, "Updating notification: answered for $phone")
+                        showOrUpdateCallNotification(phone, dir, "In call")
+                    }
+                    "ended", "missed", "rejected" -> {
+                        Log.d(TAG, "Updating notification: final outcome $outcome for $phone")
+                        showOrUpdateCallNotification(phone, dir, when (outcome) {
+                            "missed" -> "Missed"
+                            "rejected" -> "Rejected"
+                            else -> "Call ended"
+                        })
+                        // auto-clear shortly
+                        mainHandler.postDelayed({ clearCallNotification() }, 1500)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to update notification for event: ${e.localizedMessage}")
+            }
 
             // Forward to Flutter if connected; otherwise buffer in-memory for flush later
             sendToFlutterOrBuffer(mutable)
@@ -736,12 +770,14 @@ class CallService : Service() {
                 .setContentTitle("Call Tracking Running")
                 .setContentText("Detecting call events")
                 .setSmallIcon(android.R.drawable.sym_call_incoming)
+                .setOngoing(true)
                 .build()
         } else {
             Notification.Builder(this)
                 .setContentTitle("Call Tracking Running")
                 .setContentText("Detecting call events")
                 .setSmallIcon(android.R.drawable.sym_call_incoming)
+                .setOngoing(true)
                 .build()
         }
     }
@@ -756,6 +792,77 @@ class CallService : Service() {
             }
         }
     }
+
+    // ---------- Notification helpers ----------
+    private fun showOrUpdateCallNotification(phone: String, direction: String, statusText: String) {
+    try {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val title = when (direction) {
+            "outbound", "outgoing" -> "Outgoing: $phone"
+            "inbound", "incoming" -> "Incoming: $phone"
+            else -> phone
+        }
+        val content = statusText
+
+        // Build intent to open MainActivity and forward open_lead_phone
+        val targetIntent = Intent(this, com.example.call_leads_app.MainActivity::class.java).apply {
+            putExtra("open_lead_phone", phone)
+            // SingleTop + ClearTop so onNewIntent will be called if activity already exists
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+
+        // PendingIntent flags: use MUTABLE for Android 12+ only if necessary, else UPDATE_CURRENT
+        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+
+        val pending = PendingIntent.getActivity(this, /*requestCode=*/ phone.hashCode(), targetIntent, pendingFlags)
+
+        val notif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, NOTIF_CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(content)
+                .setSmallIcon(android.R.drawable.sym_call_outgoing)
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .setOngoing(true)
+                .build()
+        } else {
+            Notification.Builder(this)
+                .setContentTitle(title)
+                .setContentText(content)
+                .setSmallIcon(android.R.drawable.sym_call_outgoing)
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .setOngoing(true)
+                .build()
+        }
+
+        nm.notify(NOTIF_ID, notif)
+        Log.d(TAG, "Notification shown/updated: $title — $content (tap opens MainActivity with phone)")
+    } catch (e: Exception) {
+        Log.w(TAG, "showOrUpdateCallNotification failed: ${e.localizedMessage}")
+    }
+}
+   private fun clearCallNotification() {
+    try {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.cancel(NOTIF_ID)
+        // restart minimal foreground notification so service remains running
+        try {
+            startForeground(NOTIF_ID, buildNotification())
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restart foreground after clearing: ${e.localizedMessage}")
+        }
+        Log.d(TAG, "Cleared call notification")
+    } catch (e: Exception) {
+        Log.w(TAG, "clearCallNotification failed: ${e.localizedMessage}")
+    }
+}
+
+    // ---------- end notification helpers ----------
 
     override fun onBind(intent: Intent?): IBinder? = null
 

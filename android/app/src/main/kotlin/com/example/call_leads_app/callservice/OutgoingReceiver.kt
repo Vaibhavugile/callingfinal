@@ -1,9 +1,14 @@
 package com.example.call_leads_app.callservice
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import java.util.UUID
 
@@ -80,6 +85,15 @@ class OutgoingReceiver : BroadcastReceiver() {
 
             try {
                 ContextCompat.startForegroundService(context, serviceIntent)
+                Log.d(TAG, "Started CallService for outgoing_start (callId=$callId)")
+
+                // Post the tap notification so user can quickly open the app/lead (mirrors incoming flow)
+                try {
+                    postTapNotification(context, if (!normalized.isNullOrEmpty()) normalized else number)
+                    Log.d(TAG, "Posted tap notification for outgoing call: ${if (!normalized.isNullOrEmpty()) normalized else number}")
+                } catch (ne: Exception) {
+                    Log.w(TAG, "postTapNotification failed: ${ne.localizedMessage}")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start CallService for outgoing_start: ${e.localizedMessage}", e)
             }
@@ -188,5 +202,60 @@ class OutgoingReceiver : BroadcastReceiver() {
         }
         // fallback
         return generateCallId()
+    }
+
+    // -----------------------
+    // Notification helper (tap to open app; includes phone extra "open_lead_phone")
+    // -----------------------
+    private fun postTapNotification(context: Context, phone: String?) {
+        try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val NOTIF_CHANNEL_ID = "call_lead_channel"
+            val NOTIF_ID_LEAD = 2401
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val ch = NotificationChannel(
+                    NOTIF_CHANNEL_ID,
+                    "Call leads",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    setShowBadge(false)
+                }
+                nm.createNotificationChannel(ch)
+            }
+
+            // Launcher intent — opens the app. We add an extra so MainActivity can deep-link to the lead if you already handle it.
+            val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                if (!phone.isNullOrEmpty()) launch.putExtra("open_lead_phone", phone)
+            }
+
+            val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+
+            val pending = PendingIntent.getActivity(
+                context,
+                0,
+                launch,
+                pendingFlags
+            )
+
+            val notif = NotificationCompat.Builder(context, NOTIF_CHANNEL_ID)
+                .setContentTitle("Call in progress")
+                .setContentText(if (!phone.isNullOrEmpty()) "Tap to open lead for $phone" else "Tap to open lead")
+                .setSmallIcon(android.R.drawable.sym_call_outgoing)
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
+
+            nm.notify(NOTIF_ID_LEAD, notif)
+        } catch (ex: Exception) {
+            Log.e(TAG, "Failed to post notification: ${ex.localizedMessage}", ex)
+        }
     }
 }
