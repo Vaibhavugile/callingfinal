@@ -1,9 +1,5 @@
 // lib/services/permissions_service.dart
-// Robust permission flow with "show rationale once" behavior and safe fallbacks.
-//
-// Dependencies (pubspec.yaml):
-//   permission_handler: ^10.x
-//   url_launcher: ^6.x
+// Robust permission flow with "show rationale once" and OEM helpers.
 
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -12,26 +8,17 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class PermissionsService {
-  // Native method channel (matches MainActivity in Android)
-  static const MethodChannel _nativeChannel = MethodChannel('com.example.call_leads_app/native');
-
-  // Prefix used for SharedPreferences keys tracking which rationales/info dialogs were shown.
+  static const MethodChannel _nativeChannel = MethodChannel('oem/settings');
   static const String _kRationaleShownPrefix = 'rationale_shown_';
 
   // ------------------------
   // Public API
   // ------------------------
 
-  /// Ensure all app-required permissions are requested, showing rationales/info
-  /// dialogs only once per app install (persisted in SharedPreferences).
-  ///
-  /// Call this from an addPostFrameCallback (so dialogs don't race with initial builds).
   static Future<void> ensureAllPermissions(BuildContext ctx) async {
     try {
-      // Slight delay so UI is ready
       await Future.delayed(const Duration(milliseconds: 250));
 
-      // PHONE-related permissions (READ_PHONE_STATE / READ_PHONE_NUMBERS proxy)
       await _handlePermissionWithOnceRationale(
         ctx,
         key: 'phone',
@@ -42,7 +29,6 @@ class PermissionsService {
         requiredQuietlyIfShown: true,
       );
 
-      // FOREGROUND SERVICE: inform the user only once (no Android runtime permission required)
       await _showInfoOnceIfNeeded(
         ctx,
         key: 'foreground_service',
@@ -51,10 +37,8 @@ class PermissionsService {
             'The app uses a foreground service to reliably monitor call events. You do not need to take action — this is just to inform you.',
       );
 
-      // Draw over other apps (overlay) — special permission; ask once
       await _handleOverlayOnce(ctx, key: 'overlay');
 
-      // Notifications (Android 13+ runtime POST_NOTIFICATIONS) — ask once
       await _handlePermissionWithOnceRationale(
         ctx,
         key: 'notifications',
@@ -64,8 +48,6 @@ class PermissionsService {
         requiredQuietlyIfShown: true,
       );
 
-      // Optional: Read Call Log — show rationale once. permission_handler may not expose explicit readCallLog on all SDKs,
-      // so we use Permission.phone as a proxy where appropriate.
       await _handlePermissionWithOnceRationale(
         ctx,
         key: 'read_call_log',
@@ -73,10 +55,10 @@ class PermissionsService {
         title: 'Call log access (optional)',
         message:
             'To better match past calls and provide more accurate call history we request access to call logs. You can deny this if preferred.',
-        requiredQuietlyIfShown: false, // do not noisily re-request optional permission
+        requiredQuietlyIfShown: false,
       );
 
-      // Ask native to request dialer role (Android Q+). Native shows its own system dialog.
+      // Ask native to request dialer role (Android)
       if (Platform.isAndroid) {
         try {
           final res = await _nativeChannel.invokeMethod<bool>('requestDialerRole');
@@ -90,8 +72,54 @@ class PermissionsService {
     }
   }
 
-  /// Debug helper (use only in development) to clear the shown-rationale flags so dialogs
-  /// will appear again. Safe to call — wrapped in try/catch.
+  /// Heuristic: does this device probably need OEM settings (overlay/battery/autostart)
+  static Future<bool> needsOemSettings() async {
+    try {
+      if (!Platform.isAndroid) return false;
+
+      // overlay permission
+      final overlayStatus = await Permission.systemAlertWindow.status;
+      if (!overlayStatus.isGranted) return true;
+
+      // battery optimization ignored? If ignoreBatteryOptimizations permission exists, check it:
+      try {
+        final ignoreStatus = await Permission.ignoreBatteryOptimizations.status;
+        if (ignoreStatus.isDenied) return true;
+      } catch (_) {
+        // Some devices/permission_handler versions don't expose this permission — fallback: check common ones
+      }
+
+      // notifications sometimes blocked — don't treat as OEM necessity
+      return false;
+    } catch (e) {
+      debugPrint('needsOemSettings error: $e');
+      return false;
+    }
+  }
+
+  /// Try to open OEM-specific auto-start/floating/battery settings using a native method channel.
+  /// Falls back to opening the generic App Settings if native doesn't handle it.
+  static Future<void> openOemSettings() async {
+    try {
+      // Try vendor-specific native deep links first (MainActivity must implement 'openAutoStartSettings')
+      try {
+        final res = await _nativeChannel.invokeMethod<bool>('openAutoStartSettings');
+        if (res == true) return;
+      } catch (e) {
+        debugPrint('openAutoStartSettings native not available or failed: $e');
+      }
+
+      // Fallback: open App settings
+      await openAppSettings();
+    } catch (e) {
+      debugPrint('openOemSettings fallback error: $e');
+    }
+  }
+
+  // ------------------------
+  // Debug helper
+  // ------------------------
+
   static Future<void> clearPermissionRationaleFlagsForDebug() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -122,14 +150,9 @@ class PermissionsService {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('$_kRationaleShownPrefix$key', true);
-    } catch (_) {
-      // ignore
-    }
+    } catch (_) {}
   }
 
-  /// Generic handler that shows a rationale dialog once, then requests the permission.
-  /// If `requiredQuietlyIfShown` is true, we will call `.request()` quietly on subsequent app opens
-  /// if the permission is still not granted (no dialog).
   static Future<void> _handlePermissionWithOnceRationale(
     BuildContext ctx, {
     required String key,
@@ -140,13 +163,10 @@ class PermissionsService {
   }) async {
     try {
       final status = await permission.status;
-
       if (status.isGranted) return;
 
       final shown = await _hasShownRationale(key);
-
       if (!shown) {
-        // Show rationale dialog then request
         final proceed = await _showRationaleDialog(ctx, title: title, message: message);
         await _setShownRationale(key);
         if (!proceed) return;
@@ -155,7 +175,6 @@ class PermissionsService {
           await _showSettingsRedirectDialog(ctx, title, message);
         }
       } else {
-        // Already shown once before: either request quietly (if requested) or skip
         if (requiredQuietlyIfShown) {
           try {
             final result = await permission.request();
@@ -172,7 +191,6 @@ class PermissionsService {
     }
   }
 
-  /// Show simple rationale dialog (returns true if user tapped Allow).
   static Future<bool> _showRationaleDialog(BuildContext ctx,
       {required String title, required String message}) async {
     try {
@@ -197,7 +215,6 @@ class PermissionsService {
     }
   }
 
-  /// Show an informational dialog once (no permission). Useful for foreground service notice.
   static Future<void> _showInfoOnceIfNeeded(BuildContext ctx,
       {required String key, required String title, required String message}) async {
     try {
@@ -220,7 +237,6 @@ class PermissionsService {
     }
   }
 
-  /// Overlay / SYSTEM_ALERT_WINDOW handler showing rationale once then requesting.
   static Future<void> _handleOverlayOnce(BuildContext ctx, {required String key}) async {
     try {
       if (!Platform.isAndroid) return;
@@ -239,7 +255,6 @@ class PermissionsService {
         if (!proceed) return;
       }
 
-      // Request (this opens the system overlay settings)
       final req = await Permission.systemAlertWindow.request();
       if (req.isPermanentlyDenied) {
         await _showSettingsRedirectDialog(ctx, 'Display over apps', 'The overlay permission is blocked.');
@@ -249,7 +264,6 @@ class PermissionsService {
     }
   }
 
-  /// Settings redirect dialog (when permission is permanently denied).
   static Future<void> _showSettingsRedirectDialog(BuildContext ctx, String title, String message) async {
     try {
       await showDialog<void>(
