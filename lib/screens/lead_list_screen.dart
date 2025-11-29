@@ -186,6 +186,13 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
       _loadingLatestCalls = false;
     });
   }
+// Format a DateTime to 24-hour time (HH:mm) using local timezone.
+String _formatTime24(DateTime dt) {
+  final local = dt.toLocal();
+  final hh = local.hour.toString().padLeft(2, '0');
+  final mm = local.minute.toString().padLeft(2, '0');
+  return '$hh:$mm';
+}
 
   // Helper: is the provided DateTime 'today' local
   bool _isSameLocalDay(DateTime a, DateTime b) {
@@ -210,6 +217,46 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
       _applySearch();
     });
   }
+  // Heuristics to detect missed / rejected calls when you don't store explicit outcomes.
+bool _isMissedCall(LatestCall? latest) {
+  if (latest == null) return false;
+
+  final dir = latest.direction?.toLowerCase();
+  final dur = latest.durationInSeconds;
+
+  // Most common heuristic: inbound with zero duration -> missed.
+  if (dir == 'inbound' && dur != null && dur == 0) return true;
+
+  // Fallback: if duration is null but createdAt/finalizedAt difference suggests no conversation
+  if (dir == 'inbound' && dur == null && latest.createdAt != null && latest.finalizedAt != null) {
+    final diff = latest.finalizedAt!.difference(latest.createdAt!).inSeconds;
+    if (diff <= 1) return true; // essentially no call session
+  }
+
+  return false;
+}
+
+bool _isRejectedCall(LatestCall? latest) {
+  if (latest == null) return false;
+
+  final dir = latest.direction?.toLowerCase();
+  final dur = latest.durationInSeconds;
+
+  // Heuristic #1: outbound with zero duration often means the remote party immediately rejected/declined.
+  if (dir == 'outbound' && dur != null && dur == 0) return true;
+
+  // Heuristic #2: extremely short calls (created -> finalized < threshold) often indicate an explicit reject.
+  if (latest.createdAt != null && latest.finalizedAt != null) {
+    final diff = latest.finalizedAt!.difference(latest.createdAt!).inSeconds;
+    if (diff <= 2 && (dur == null || dur == 0)) {
+      // Could be inbound or outbound — treat very very short calls as rejected/declined.
+      return true;
+    }
+  }
+
+  return false;
+}
+
 
   void _applySearch() {
     final query = _searchCtrl.text.toLowerCase();
@@ -238,8 +285,13 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
       final direction = latest.direction?.toLowerCase();
 
       if (_selectedFilter == 'Answered') return latest.durationInSeconds != null && (latest.durationInSeconds! > 0);
-      if (_selectedFilter == 'Missed') return false; // cannot reliably detect missed without outcome field
-      if (_selectedFilter == 'Rejected') return false;
+      if (_selectedFilter == 'Missed') {
+  return _isMissedCall(latest);
+}
+
+if (_selectedFilter == 'Rejected') {
+  return _isRejectedCall(latest);
+};
       if (_selectedFilter == 'Incoming') return direction == 'inbound';
       if (_selectedFilter == 'Outgoing') return direction == 'outbound';
 
@@ -523,17 +575,28 @@ Future<void> _openWhatsApp(String? rawNumber) async {
 
   // duration & last time from latest call in subcollection
   String durationLabel = '';
-  String lastCallTimeLabel = '';
-  if (latest != null) {
-    if (latest.durationInSeconds != null) {
-      final d = latest.durationInSeconds!;
-      final mins = d ~/ 60;
-      final secs = d % 60;
-      durationLabel = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
-    }
-    final dt = latest.finalizedAt ?? latest.createdAt;
-    if (dt != null) lastCallTimeLabel = timeAgoShort(dt) ?? '';
+String lastCallTimeLabel = '';
+
+// compute duration as before
+if (latest != null) {
+  if (latest.durationInSeconds != null) {
+    final d = latest.durationInSeconds!;
+    final mins = d ~/ 60;
+    final secs = d % 60;
+    durationLabel = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
   }
+
+  // prefer finalizedAt, fall back to createdAt
+  final dt = latest.finalizedAt ?? latest.createdAt;
+  if (dt != null) {
+    lastCallTimeLabel = _formatTime24(dt);
+  }
+}
+
+// if there's no latest call, optionally fall back to lead.lastInteraction
+if (lastCallTimeLabel.isEmpty && lead.lastInteraction != null) {
+  lastCallTimeLabel = _formatTime24(lead.lastInteraction);
+}
 
   final subtitleText = '${lead.phoneNumber}${lead.nextFollowUp != null ? ' • ${lead.nextFollowUp!.day}/${lead.nextFollowUp!.month}' : ''}';
 
@@ -601,11 +664,12 @@ Future<void> _openWhatsApp(String? rawNumber) async {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    Text(
-                      // show last call time (short) if available, else fallback to lead lastInteraction
-                      lastCallTimeLabel.isNotEmpty ? lastCallTimeLabel : _leadTimeLabel(lead),
-                      style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade400),
-                    ),
+                  Text(
+  // now contains HH:mm or empty
+  lastCallTimeLabel.isNotEmpty ? lastCallTimeLabel : '',
+  style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade400),
+),
+
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -641,52 +705,50 @@ Future<void> _openWhatsApp(String? rawNumber) async {
           const SizedBox(width: 8),
 
           // ---- CALL + WHATSAPP ICONS: opens dialer and WhatsApp respectively ----
-          Row(
-            children: [
-              // CALL BUTTON
-              Container(
-                margin: const EdgeInsets.only(left: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(10),
-                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
-                ),
-                child: IconButton(
-                  icon: const Icon(Icons.phone, size: 20),
-                  color: _primaryColor,
-                  padding: const EdgeInsets.all(8),
-                  tooltip: 'Call ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
-                  onPressed: () => _openDialer(lead.phoneNumber),
-                ),
-              ),
-
-              const SizedBox(width: 8),
-
-              // WHATSAPP BUTTON
-              // WHATSAPP BUTTON (replace the previous Image.network SVG)
-Container(
-  decoration: BoxDecoration(
-    color: Colors.white,
-    borderRadius: BorderRadius.circular(10),
-    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
-  ),
-  child: IconButton(
-    iconSize: 20,
-    padding: const EdgeInsets.all(8),
-    tooltip: 'WhatsApp ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
-    icon: Image.network(
-      // PNG icon (renders reliably). If you prefer a local asset, replace with Image.asset(...)
-      'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
-      width: 20,
-      height: 20,
-      errorBuilder: (_, __, ___) => const Icon(Icons.message, size: 20),
+          // ---- CALL + WHATSAPP ICONS: stacked vertically (one above the other) ----
+Column(
+  mainAxisSize: MainAxisSize.min,
+  children: [
+    // CALL BUTTON (top)
+    Container(
+      margin: const EdgeInsets.only(left: 8, bottom: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
+      ),
+      child: IconButton(
+        icon: const Icon(Icons.phone, size: 20),
+        color: _primaryColor,
+        padding: const EdgeInsets.all(8),
+        tooltip: 'Call ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
+        onPressed: () => _openDialer(lead.phoneNumber),
+      ),
     ),
-    onPressed: () => _openWhatsApp(lead.phoneNumber),
-  ),
+
+    // WHATSAPP BUTTON (bottom)
+    Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
+      ),
+      child: IconButton(
+        iconSize: 20,
+        padding: const EdgeInsets.all(8),
+        tooltip: 'WhatsApp ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
+        icon: Image.network(
+          'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
+          width: 20,
+          height: 20,
+          errorBuilder: (_, __, ___) => const Icon(Icons.message, size: 20),
+        ),
+        onPressed: () => _openWhatsApp(lead.phoneNumber),
+      ),
+    ),
+  ],
 ),
 
-            ],
-          ),
         ],
       ),
     ),
