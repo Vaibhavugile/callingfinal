@@ -1,6 +1,9 @@
 // lib/screens/lead_list_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart'; // for defaultTargetPlatform, kIsWeb
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:url_launcher/url_launcher_string.dart';
 import '../models/lead.dart';
 import '../services/lead_service.dart';
 import 'lead_form_screen.dart';
@@ -321,136 +324,375 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
   }
 
   // -----------------------------------------
+  // DIALER / PHONE HELPERS
+  // -----------------------------------------
+  // Sanitize phone number to remove spaces/extra chars but keep '+' if present
+ // Sanitize phone number and normalize for dialing/WhatsApp.
+// - Keeps a leading '+' if already present.
+// - Removes non-digit chars.
+// - Strips leading zeros.
+// - If number looks like a 10-digit Indian number, prepends +91.
+String _sanitizePhone(String? raw) {
+  if (raw == null) return '';
+  var trimmed = raw.trim();
+
+  // If user provided explicit +, preserve + and digits only
+  if (trimmed.startsWith('+')) {
+    final digits = trimmed.replaceAll(RegExp(r'[^0-9+]'), '');
+    // ensure only a single leading '+'
+    final normalized = '+' + digits.replaceAll('+', '');
+    return normalized;
+  }
+
+  // Remove everything except digits
+  var digitsOnly = trimmed.replaceAll(RegExp(r'[^0-9]'), '');
+
+  // Strip leading zeros (e.g., 0XXXXXXXXXX -> XXXXXXXXXX)
+  while (digitsOnly.startsWith('0')) {
+    digitsOnly = digitsOnly.substring(1);
+  }
+
+  // If exactly 10 digits -> assume India and prepend +91
+  if (digitsOnly.length == 10) {
+    return '+91$digitsOnly';
+  }
+
+  // If starts with country code like 91XXXXXXXX... without +, add +
+  if (digitsOnly.length > 10 && digitsOnly.startsWith('91')) {
+    return '+$digitsOnly';
+  }
+
+  // Fallback: if it already looks like a long international number, prefix +
+  if (digitsOnly.length > 10) {
+    return '+$digitsOnly';
+  }
+
+  // If still short/unknown, return as-is (may be invalid)
+  return digitsOnly;
+}
+
+
+  Future<void> _openDialer(String? rawNumber) async {
+    print("=== DIALER DEBUG START ===");
+
+    final number = _sanitizePhone(rawNumber);
+    print("Raw number: $rawNumber");
+    print("Sanitized number: $number");
+
+    if (number.isEmpty) {
+      print("❌ No phone number found.");
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No phone number available for this lead.')),
+      );
+      print("=== DIALER DEBUG END ===");
+      return;
+    }
+
+    final uri = Uri(scheme: 'tel', path: number);
+    print("Phone URI to launch: $uri");
+
+    print("Platform: ${defaultTargetPlatform}");
+    print("kIsWeb: $kIsWeb");
+
+    // Check canLaunch first
+    try {
+      final can = await canLaunchUrl(uri);
+      print("canLaunchUrl(uri): $can");
+    } catch (e) {
+      print("❌ canLaunchUrl threw error: $e");
+    }
+
+    // Try launchUrl(...)
+    try {
+      print("Trying launchUrl() with externalApplication...");
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      print("launchUrl result: $launched");
+
+      if (launched) {
+        print("✅ Dialer opened successfully.");
+        print("=== DIALER DEBUG END ===");
+        return;
+      }
+
+      // fallback using launchUrlString
+      print("⚠️ launchUrl returned false; trying fallback launchUrlString...");
+      final fallback = "tel:$number";
+      bool fallbackResult = false;
+      try {
+        // on non-web attempt with externalApplication, on web just try string
+        if (!kIsWeb) {
+          fallbackResult = await launchUrlString(fallback, mode: LaunchMode.externalApplication);
+        } else {
+          fallbackResult = await launchUrlString(fallback);
+        }
+      } catch (fe) {
+        print("❌ fallback launch threw: $fe");
+      }
+      print("Fallback launchUrlString result: $fallbackResult");
+
+      if (!fallbackResult) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open the dialer on this device.')),
+        );
+      }
+    } catch (e, st) {
+      print("❌ ERROR during launchUrl:");
+      print("Error: $e");
+      print("Stacktrace: $st");
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Error while trying to open dialer.')),
+      );
+    }
+
+    print("=== DIALER DEBUG END ===");
+  }
+
+  /// Open WhatsApp chat with the given phone number (uses wa.me).
+/// Ensures number includes +countryCode using _sanitizePhone.
+Future<void> _openWhatsApp(String? rawNumber) async {
+  print("=== WHATSAPP DEBUG START ===");
+
+  final normalized = _sanitizePhone(rawNumber);
+  print("Raw WA number: $rawNumber");
+  print("Normalized WA number: $normalized");
+
+  if (normalized.isEmpty) {
+    print("No number to open in WhatsApp.");
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No phone number available")));
+    print("=== WHATSAPP DEBUG END ===");
+    return;
+  }
+
+  // wa.me wants digits only (no '+')
+  final waPathNumber = normalized.startsWith('+') ? normalized.substring(1) : normalized;
+  final waUri = Uri.parse("https://wa.me/$waPathNumber");
+  final webWhatsapp = Uri.parse("https://web.whatsapp.com/send?phone=$waPathNumber");
+
+  print("WhatsApp URI: $waUri");
+  bool opened = false;
+
+  try {
+    // Try to open via external app (this will open the native WhatsApp if installed)
+    opened = await launchUrl(waUri, mode: LaunchMode.externalApplication);
+    print("launchUrl(waUri) result: $opened");
+  } catch (e) {
+    print("launchUrl(waUri) threw: $e");
+  }
+
+  if (!opened) {
+    // Try fallback to web.whatsapp (may open in browser)
+    try {
+      opened = await launchUrl(webWhatsapp, mode: LaunchMode.externalApplication);
+      print("launchUrl(webWhatsapp) result: $opened");
+    } catch (e) {
+      print("web.whatsapp launch threw: $e");
+      opened = false;
+    }
+  }
+
+  if (!opened) {
+    // Final fallback: try launchUrlString (older API) as a last attempt
+    try {
+      final fallbackString = "https://wa.me/$waPathNumber";
+      final fallbackLaunched = await launchUrlString(fallbackString, mode: LaunchMode.externalApplication);
+      print("launchUrlString fallback result: $fallbackLaunched");
+      opened = fallbackLaunched;
+    } catch (e) {
+      print("launchUrlString fallback threw: $e");
+    }
+  }
+
+  if (!opened) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Could not open WhatsApp.")));
+  }
+
+  print("=== WHATSAPP DEBUG END ===");
+}
+
+
+
+  // -----------------------------------------
   // UI: ANIMATED, GLOSSY LEAD ROW (shows duration + last call time)
   // -----------------------------------------
   Widget _leadRow(Lead lead) {
-    final bool needsReview = lead.needsManualReview;
-    final latest = _latestCallByLead[lead.id];
+  final bool needsReview = lead.needsManualReview;
+  final latest = _latestCallByLead[lead.id];
 
-    // duration & last time from latest call in subcollection
-    String durationLabel = '';
-    String lastCallTimeLabel = '';
-    if (latest != null) {
-      if (latest.durationInSeconds != null) {
-        final d = latest.durationInSeconds!;
-        final mins = d ~/ 60;
-        final secs = d % 60;
-        durationLabel = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
-      }
-      final dt = latest.finalizedAt ?? latest.createdAt;
-      if (dt != null) lastCallTimeLabel = timeAgoShort(dt) ?? '';
+  // duration & last time from latest call in subcollection
+  String durationLabel = '';
+  String lastCallTimeLabel = '';
+  if (latest != null) {
+    if (latest.durationInSeconds != null) {
+      final d = latest.durationInSeconds!;
+      final mins = d ~/ 60;
+      final secs = d % 60;
+      durationLabel = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
     }
-
-    final subtitleText = '${lead.phoneNumber}${lead.nextFollowUp != null ? ' • ${lead.nextFollowUp!.day}/${lead.nextFollowUp!.month}' : ''}';
-
-    final isPressed = _pressedLeadId == lead.id;
-
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _pressedLeadId = lead.id),
-      onTapCancel: () => setState(() => _pressedLeadId = null),
-      onTapUp: (_) {
-        setState(() => _pressedLeadId = null);
-        Navigator.push(
-          context,
-          PageRouteBuilder(
-            transitionDuration: const Duration(milliseconds: 280),
-            pageBuilder: (_, __, ___) => LeadFormScreen(lead: lead, autoOpenedFromCall: false),
-          ),
-        ).then((_) => _loadLeads());
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-        decoration: BoxDecoration(
-          gradient: _cardGradient,
-          borderRadius: BorderRadius.circular(14),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(isPressed ? 0.12 : 0.06),
-              blurRadius: isPressed ? 12 : 8,
-              offset: Offset(0, isPressed ? 6 : 4),
-            ),
-          ],
-          border: Border.all(color: Colors.black.withOpacity(0.02)),
-        ),
-        transform: Matrix4.identity()..scale(isPressed ? 0.995 : 1.0),
-        child: Row(
-          children: [
-            // direction icon instead of avatar — use only subcollection direction
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(colors: [Colors.white, _primaryColor.withOpacity(0.06)]),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.black.withOpacity(0.04)),
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 6, offset: const Offset(0, 3))],
-              ),
-              child: Center(child: _directionIcon(lead)),
-            ),
-
-            const SizedBox(width: 14),
-
-            // Main text
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          lead.name.isEmpty ? 'No name' : lead.name,
-                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: needsReview ? _accentColor : _primaryColor),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        // show last call time (short) if available, else fallback to lead lastInteraction
-                        lastCallTimeLabel.isNotEmpty ? lastCallTimeLabel : _leadTimeLabel(lead),
-                        style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade400),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          subtitleText,
-                          style: TextStyle(fontSize: 13, color: Colors.blueGrey.shade400),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      // show duration only (no outcome)
-                      if (durationLabel.isNotEmpty)
-                        Container(
-                          margin: const EdgeInsets.only(left: 8),
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            durationLabel,
-                            style: TextStyle(fontSize: 11, color: Colors.blueGrey.shade700, fontWeight: FontWeight.w800),
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(width: 8),
-            // removed quick action icons as requested
-          ],
-        ),
-      ),
-    );
+    final dt = latest.finalizedAt ?? latest.createdAt;
+    if (dt != null) lastCallTimeLabel = timeAgoShort(dt) ?? '';
   }
+
+  final subtitleText = '${lead.phoneNumber}${lead.nextFollowUp != null ? ' • ${lead.nextFollowUp!.day}/${lead.nextFollowUp!.month}' : ''}';
+
+  final isPressed = _pressedLeadId == lead.id;
+
+  return GestureDetector(
+    onTapDown: (_) => setState(() => _pressedLeadId = lead.id),
+    onTapCancel: () => setState(() => _pressedLeadId = null),
+    onTapUp: (_) {
+      setState(() => _pressedLeadId = null);
+      Navigator.push(
+        context,
+        PageRouteBuilder(
+          transitionDuration: const Duration(milliseconds: 280),
+          pageBuilder: (_, __, ___) => LeadFormScreen(lead: lead, autoOpenedFromCall: false),
+        ),
+      ).then((_) => _loadLeads());
+    },
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      decoration: BoxDecoration(
+        gradient: _cardGradient,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(isPressed ? 0.12 : 0.06),
+            blurRadius: isPressed ? 12 : 8,
+            offset: Offset(0, isPressed ? 6 : 4),
+          ),
+        ],
+        border: Border.all(color: Colors.black.withOpacity(0.02)),
+      ),
+      transform: Matrix4.identity()..scale(isPressed ? 0.995 : 1.0),
+      child: Row(
+        children: [
+          // direction icon instead of avatar — use only subcollection direction
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: [Colors.white, _primaryColor.withOpacity(0.06)]),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.black.withOpacity(0.04)),
+              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 6, offset: const Offset(0, 3))],
+            ),
+            child: Center(child: _directionIcon(lead)),
+          ),
+
+          const SizedBox(width: 14),
+
+          // Main text
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        lead.name.isEmpty ? 'No name' : lead.name,
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: needsReview ? _accentColor : _primaryColor),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      // show last call time (short) if available, else fallback to lead lastInteraction
+                      lastCallTimeLabel.isNotEmpty ? lastCallTimeLabel : _leadTimeLabel(lead),
+                      style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade400),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        subtitleText,
+                        style: TextStyle(fontSize: 13, color: Colors.blueGrey.shade400),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    // show duration only (no outcome)
+                    if (durationLabel.isNotEmpty)
+                      Container(
+                        margin: const EdgeInsets.only(left: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          durationLabel,
+                          style: TextStyle(fontSize: 11, color: Colors.blueGrey.shade700, fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(width: 8),
+
+          // ---- CALL + WHATSAPP ICONS: opens dialer and WhatsApp respectively ----
+          Row(
+            children: [
+              // CALL BUTTON
+              Container(
+                margin: const EdgeInsets.only(left: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.phone, size: 20),
+                  color: _primaryColor,
+                  padding: const EdgeInsets.all(8),
+                  tooltip: 'Call ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
+                  onPressed: () => _openDialer(lead.phoneNumber),
+                ),
+              ),
+
+              const SizedBox(width: 8),
+
+              // WHATSAPP BUTTON
+              // WHATSAPP BUTTON (replace the previous Image.network SVG)
+Container(
+  decoration: BoxDecoration(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(10),
+    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
+  ),
+  child: IconButton(
+    iconSize: 20,
+    padding: const EdgeInsets.all(8),
+    tooltip: 'WhatsApp ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
+    icon: Image.network(
+      // PNG icon (renders reliably). If you prefer a local asset, replace with Image.asset(...)
+      'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
+      width: 20,
+      height: 20,
+      errorBuilder: (_, __, ___) => const Icon(Icons.message, size: 20),
+    ),
+    onPressed: () => _openWhatsApp(lead.phoneNumber),
+  ),
+),
+
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 
   Widget _directionIcon(Lead lead) {
     final latest = _latestCallByLead[lead.id];
