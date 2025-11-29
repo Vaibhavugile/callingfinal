@@ -1,5 +1,4 @@
-
-// UPDATED main.dart with improved auth logging & tenant sync diagnostics.
+// UPDATED main.dart with improved auth logging, tenant sync diagnostics, and permission onboarding.
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -13,8 +12,10 @@ import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'services/auth_service.dart';
 
-const MethodChannel _nativeChannel =
-    MethodChannel('com.example.call_leads_app/native');
+// NEW: permissions service to request needed runtime permissions on first run
+import 'services/permissions_service.dart';
+
+const MethodChannel _nativeChannel = MethodChannel('com.example.call_leads_app/native');
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,6 +35,15 @@ void main() async {
     print('📣 Preloaded SharedPreferences tenantId=$tenant');
   } catch (e) {
     print('⚠️ Could not read SharedPreferences on startup: $e');
+  }
+
+  // Try flushing any native pending events (harmless if native method missing).
+  try {
+    await _nativeChannel.invokeMethod('flushPendingEvents');
+    print('🔁 Requested native flushPendingEvents()');
+  } catch (e) {
+    // ignore — native may not be ready (we'll also flush when EventChannel attaches)
+    print('ℹ️ flushPendingEvents not available yet or failed: $e');
   }
 
   runApp(MyApp());
@@ -56,9 +66,18 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
     _callHandler = CallEventHandler(navigatorKey: navigatorKey);
 
+    // Run permission onboarding after first frame so dialogs don't conflict with startup UI
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        await PermissionsService.ensureAllPermissions(navigatorKey.currentContext ?? context);
+        print('🔔 Permissions flow completed (or dismissed by user).');
+      } catch (e) {
+        print('⚠️ Permissions flow error: $e');
+      }
+    });
+
     // Monitor Firebase auth state
-    _authSub =
-        FirebaseAuth.instance.authStateChanges().listen((User? user) async {
+    _authSub = FirebaseAuth.instance.authStateChanges().listen((User? user) async {
       print("🔐 authStateChanges() => uid=${user?.uid}, email=${user?.email}");
 
       if (user != null) {
@@ -74,6 +93,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
         // start call handler
         try {
+          // startListening may rely on engine being ready; schedule microtask to avoid sync races
           Future.microtask(() => _callHandler.startListening());
         } catch (e) {
           print("❌ Failed to start CallEventHandler: $e");
@@ -104,7 +124,11 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       if (FirebaseAuth.instance.currentUser != null) {
         print("🔄 Resumed — reattaching CallEventHandler.");
-        _callHandler.startListening();
+        try {
+          _callHandler.startListening();
+        } catch (e) {
+          print("❌ startListening on resume failed: $e");
+        }
       }
     }
   }

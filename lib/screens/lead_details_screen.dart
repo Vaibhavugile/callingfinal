@@ -160,11 +160,7 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> with TickerProvid
     return '${minutes}:${secs}'; // mm:ss format
   }
 
-  String _formatDateTimeShort(DateTime dt) {
-    final d = dt.toLocal();
-    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} "
-        "${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}";
-  }
+  
 
   Future<String> _getTenantIdFromPrefs() async {
     try {

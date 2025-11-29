@@ -307,14 +307,10 @@ Future<void> _openWhatsApp(String? rawNumber) async {
 }
 // Format DateTime to local "YYYY-MM-DD HH:mm" (used by header & call rows)
 String _formatDateTimeShort(DateTime dt) {
-  final d = dt.toLocal();
-  final y = d.year.toString();
-  final m = d.month.toString().padLeft(2, '0');
-  final day = d.day.toString().padLeft(2, '0');
-  final hh = d.hour.toString().padLeft(2, '0');
-  final mm = d.minute.toString().padLeft(2, '0');
-  return '$y-$m-$day $hh:$mm';
-}
+    final d = dt.toLocal();
+    return "${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} "
+        "${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}";
+  }
 
   /// Save lead including new fields
   Future<void> _saveLead({String? newStatus, String? newName}) async {
