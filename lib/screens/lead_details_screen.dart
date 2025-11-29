@@ -445,7 +445,7 @@ Future<void> _openWhatsApp(String? rawNumber) async {
     // Show last seen (from calls subcollection if available)
     final LatestCall? call = _latestCalls.isNotEmpty ? _latestCalls.first : null;
     final DateTime? lastSeen = call?.finalizedAt ?? call?.createdAt ?? _lead.lastInteraction;
-    final lastSeenLabel = lastSeen != null ? _timeAgo(lastSeen) ?? _formatDateTimeShort(lastSeen) : '—';
+    final lastSeenLabel = lastSeen != null ? _formatDateTimeShort(lastSeen) : '—';
 
     return Container(
       decoration: BoxDecoration(
@@ -602,8 +602,8 @@ Column(
   Widget _callRow(LatestCall call) {
     final dir = call.direction?.toLowerCase();
     final bool inbound = dir == 'inbound';
-    final DateTime? dt = call.finalizedAt ?? call.createdAt;
-    final String timeShort = dt != null ? (_timeAgo(dt) ?? _formatDateTimeShort(dt)) : '—';
+final DateTime? dt = call.finalizedAt ?? call.createdAt;
+final String timeShort = dt != null ? _formatDateTimeShort(dt) : '—';
     final String duration = (call.durationInSeconds != null) ? _formatDuration(call.durationInSeconds!) : '';
 
     return InkWell(

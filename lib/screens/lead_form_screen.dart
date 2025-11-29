@@ -305,6 +305,16 @@ Future<void> _openWhatsApp(String? rawNumber) async {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open WhatsApp.')));
   }
 }
+// Format DateTime to local "YYYY-MM-DD HH:mm" (used by header & call rows)
+String _formatDateTimeShort(DateTime dt) {
+  final d = dt.toLocal();
+  final y = d.year.toString();
+  final m = d.month.toString().padLeft(2, '0');
+  final day = d.day.toString().padLeft(2, '0');
+  final hh = d.hour.toString().padLeft(2, '0');
+  final mm = d.minute.toString().padLeft(2, '0');
+  return '$y-$m-$day $hh:$mm';
+}
 
   /// Save lead including new fields
   Future<void> _saveLead({String? newStatus, String? newName}) async {
@@ -498,7 +508,7 @@ Future<void> _openWhatsApp(String? rawNumber) async {
 
     final LatestCall? call = _latestCalls.isNotEmpty ? _latestCalls.first : null;
     final DateTime? lastSeen = call?.finalizedAt ?? call?.createdAt ?? _lead.lastInteraction;
-    final lastSeenLabel = lastSeen != null ? (_timeAgo(lastSeen) ?? _formatDate(lastSeen)) : '—';
+   final lastSeenLabel = lastSeen != null ? _formatDateTimeShort(lastSeen) : '—';
 
     return Container(
       decoration: BoxDecoration(
@@ -652,8 +662,8 @@ Column(
   Widget _callRow(LatestCall call) {
     final dir = call.direction?.toLowerCase();
     final bool inbound = dir == 'inbound';
-    final DateTime? dt = call.finalizedAt ?? call.createdAt;
-    final String timeShort = dt != null ? (_timeAgo(dt) ?? _formatDate(dt)) : '—';
+final DateTime? dt = call.finalizedAt ?? call.createdAt;
+final String timeShort = dt != null ? _formatDateTimeShort(dt) : '—';
     final String duration = (call.durationInSeconds != null) ? _formatDuration(call.durationInSeconds!) : '-';
 
     final Color bgColor = inbound ? Colors.green.shade50 : Colors.indigo.shade50;
