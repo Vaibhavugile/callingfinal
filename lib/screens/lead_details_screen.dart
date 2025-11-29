@@ -4,6 +4,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/lead.dart';
 import '../services/lead_service.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:url_launcher/url_launcher_string.dart';
+import 'package:flutter/foundation.dart'; // for kIsWeb if not already imported
 
 // -----------------------------------------------------------------------------
 // Premium Theme
@@ -259,6 +262,88 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> with TickerProvid
     }
   }
 
+  // -----------------------------
+// Phone / WhatsApp helpers
+// -----------------------------
+String _sanitizePhone(String? raw) {
+  if (raw == null) return '';
+  var trimmed = raw.trim();
+
+  if (trimmed.startsWith('+')) {
+    final digits = trimmed.replaceAll(RegExp(r'[^0-9+]'), '');
+    final normalized = '+' + digits.replaceAll('+', '');
+    return normalized;
+  }
+
+  var digitsOnly = trimmed.replaceAll(RegExp(r'[^0-9]'), '');
+
+  while (digitsOnly.startsWith('0')) {
+    digitsOnly = digitsOnly.substring(1);
+  }
+
+  if (digitsOnly.length == 10) {
+    return '+91$digitsOnly';
+  }
+
+  if (digitsOnly.length > 10 && digitsOnly.startsWith('91')) {
+    return '+$digitsOnly';
+  }
+
+  if (digitsOnly.length > 10) {
+    return '+$digitsOnly';
+  }
+
+  return digitsOnly;
+}
+
+Future<void> _openDialer(String? rawNumber) async {
+  final number = _sanitizePhone(rawNumber);
+  if (number.isEmpty) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No phone number available')));
+    return;
+  }
+  final uri = Uri(scheme: 'tel', path: number);
+
+  try {
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched) {
+      final fallback = "tel:$number";
+      if (!kIsWeb) {
+        await launchUrlString(fallback, mode: LaunchMode.externalApplication);
+      } else {
+        await launchUrlString(fallback);
+      }
+    }
+  } catch (e) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open dialer.')));
+  }
+}
+
+Future<void> _openWhatsApp(String? rawNumber) async {
+  final normalized = _sanitizePhone(rawNumber);
+  if (normalized.isEmpty) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No phone number available')));
+    return;
+  }
+
+  final waDigits = normalized.startsWith('+') ? normalized.substring(1) : normalized;
+  final waUri = Uri.parse("https://wa.me/$waDigits");
+  final webWhatsapp = Uri.parse("https://web.whatsapp.com/send?phone=$waDigits");
+
+  try {
+    var opened = await launchUrl(waUri, mode: LaunchMode.externalApplication);
+    if (!opened) {
+      opened = await launchUrl(webWhatsapp, mode: LaunchMode.externalApplication);
+    }
+    if (!opened) {
+      await launchUrlString("https://wa.me/$waDigits", mode: LaunchMode.externalApplication);
+    }
+  } catch (e) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open WhatsApp.')));
+  }
+}
+
+
   Future<void> _saveStatus(String newStatus) async {
     final prefsTenant = await _getTenantIdFromPrefs();
     final updated = _lead.copyWith(
@@ -409,19 +494,50 @@ class _LeadDetailsScreenState extends State<LeadDetailsScreen> with TickerProvid
               ),
             ]),
           ),
-          ScaleTransition(
-            scale: Tween(begin: 0.98, end: 1.02).animate(CurvedAnimation(parent: _pulse_controller, curve: Curves.easeInOut)),
-            child: Material(
-              color: _accentColor,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              child: IconButton(
-                icon: const Icon(Icons.save),
-                color: _primaryColor,
-                onPressed: _saving ? null : _saveAll,
-                tooltip: 'Save',
-              ),
-            ),
+          // Stacked Call + WhatsApp buttons (uses same pulse animation controller)
+Column(
+  mainAxisSize: MainAxisSize.min,
+  children: [
+    ScaleTransition(
+      scale: Tween(begin: 0.98, end: 1.02).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut)),
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10)],
+        ),
+        child: IconButton(
+          icon: const Icon(Icons.phone),
+          color: _primaryColor,
+          tooltip: 'Call',
+          onPressed: () => _openDialer(_lead.phoneNumber),
+        ),
+      ),
+    ),
+    const SizedBox(height: 8),
+    ScaleTransition(
+      scale: Tween(begin: 0.98, end: 1.02).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut)),
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10)],
+        ),
+        child: IconButton(
+          icon: Image.network(
+            'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
+            width: 20,
+            height: 20,
+            errorBuilder: (_, __, ___) => const Icon(Icons.message, size: 20),
           ),
+          tooltip: 'WhatsApp',
+          onPressed: () => _openWhatsApp(_lead.phoneNumber),
+        ),
+      ),
+    ),
+  ],
+),
+
         ],
       ),
     );
