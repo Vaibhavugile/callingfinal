@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 
 /**
  * Rock-solid persistent queue stored in SharedPreferences.
@@ -43,6 +44,7 @@ class EventQueue(private val ctx: Context) {
             JSONArray(raw)
         } catch (e: Exception) {
             Log.e(TAG, "Corrupted JSON detected. Resetting queue: ${e.localizedMessage}")
+            FirebaseCrashlytics.getInstance().recordException(e)
             JSONArray()
         }
     }
@@ -56,6 +58,7 @@ class EventQueue(private val ctx: Context) {
             prefs.edit().putString(KEY, arr.toString()).apply()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to persist EventQueue JSON: ${e.localizedMessage}. Clearing queue to recover.")
+            FirebaseCrashlytics.getInstance().recordException(e)
             try {
                 prefs.edit().remove(KEY).apply()
             } catch (ex: Exception) {
@@ -84,6 +87,7 @@ class EventQueue(private val ctx: Context) {
                     jo.put(k, v?.toString() ?: JSONObject.NULL)
                 } catch (ex: Exception) {
                     // give up on this field
+                    FirebaseCrashlytics.getInstance().recordException(ex)
                 }
             }
         }
@@ -112,6 +116,7 @@ class EventQueue(private val ctx: Context) {
                 }
                 saveArray(trimmed)
                 Log.w(TAG, "EventQueue exceeded MAX_QUEUE_SIZE; trimmed to last $MAX_QUEUE_SIZE entries.")
+                FirebaseCrashlytics.getInstance().log("EventQueue trimmed to $MAX_QUEUE_SIZE entries")
             } else {
                 saveArray(arr)
             }
@@ -170,6 +175,7 @@ class EventQueue(private val ctx: Context) {
                 prefs.edit().remove(KEY).apply()
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to clear EventQueue: ${e.localizedMessage}")
+                FirebaseCrashlytics.getInstance().recordException(e)
             }
         }
     }
@@ -223,6 +229,7 @@ class EventQueue(private val ctx: Context) {
             if (removed > 0) {
                 saveArray(newArr)
                 Log.w(TAG, "Removed $removed stale queued entries older than ${olderThanMs}ms to avoid blocking.")
+                FirebaseCrashlytics.getInstance().log("EventQueue removed $removed stale entries")
             }
             return removed
         }
@@ -241,6 +248,7 @@ class EventQueue(private val ctx: Context) {
             return try {
                 prefs.getString(KEY, "[]") ?: "[]"
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 "[]"
             }
         }
@@ -264,10 +272,12 @@ class EventQueue(private val ctx: Context) {
                         val received = jo.opt("receivedAt") ?: "<no-ts>"
                         Log.d(TAG, "  [$i] phone=$phone tenant=$tenant received=$received")
                     } catch (e: Exception) {
+                        FirebaseCrashlytics.getInstance().recordException(e)
                         Log.d(TAG, "  [$i] (error reading item): ${e.localizedMessage}")
                     }
                 }
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.w(TAG, "dumpToLog failed: ${e.localizedMessage}")
             }
         }

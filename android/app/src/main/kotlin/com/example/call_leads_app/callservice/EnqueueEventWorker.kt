@@ -4,7 +4,17 @@ import android.content.Context
 import android.util.Log
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 
+/**
+ * Worker used as a robust fallback when starting the foreground CallService fails.
+ * Persists the incoming event into EventQueue so UploadWorker will pick it up later.
+ *
+ * - Preserves tenantId when present in inputData.
+ * - Normalizes phone numbers to digits-only.
+ * - Attempts to recover phoneNumber via callId using tryFindPhoneForCallId().
+ * - Adds a receivedAt timestamp if missing.
+ */
 class EnqueueEventWorker(appContext: Context, workerParams: WorkerParameters) : Worker(appContext, workerParams) {
     private val TAG = "EnqueueEventWorker"
 
@@ -17,11 +27,18 @@ class EnqueueEventWorker(appContext: Context, workerParams: WorkerParameters) : 
         return try {
             val data = inputData
             val eventMap = mutableMapOf<String, Any?>()
-            data.keyValueMap.forEach { (k, v) ->
-                eventMap[k] = v
+
+            // Copy all allowed key/value pairs from inputData
+            try {
+                data.keyValueMap.forEach { (k, v) ->
+                    eventMap[k] = v
+                }
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "Failed to copy inputData to map: ${e.localizedMessage}")
             }
 
-            // --- NEW: ensure tenantId copied/preserved from inputData if present ---
+            // --- Preserve tenantId if provided in inputData ---
             try {
                 val inputTenant = data.getString("tenantId")
                 if (!inputTenant.isNullOrEmpty()) {
@@ -29,12 +46,15 @@ class EnqueueEventWorker(appContext: Context, workerParams: WorkerParameters) : 
                     Log.d(TAG, "Preserved tenantId from inputData: $inputTenant")
                 }
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.w(TAG, "Error while preserving tenantId from inputData: ${e.localizedMessage}")
             }
-            // --- end tenant preservation ---
 
             // Normalize phoneNumber if present (digits-only)
-            val phoneRaw = eventMap["phoneNumber"] as? String
+            val phoneRaw = when (val p = eventMap["phoneNumber"]) {
+                is String -> p
+                else -> null
+            }
             val normalized = phoneRaw?.filter { it.isDigit() }
             if (!normalized.isNullOrEmpty()) {
                 eventMap["phoneNumber"] = normalized
@@ -47,7 +67,6 @@ class EnqueueEventWorker(appContext: Context, workerParams: WorkerParameters) : 
             if ((eventMap["phoneNumber"] == null || (eventMap["phoneNumber"] as? String).isNullOrEmpty())) {
                 val callId = eventMap["callId"] as? String
                 if (!callId.isNullOrEmpty()) {
-                    // brief retry loop: sometimes the marker is persisted a few ms after the event
                     var recovered: String? = null
                     var attempt = 0
                     while (attempt < 4 && recovered.isNullOrEmpty()) {
@@ -62,7 +81,6 @@ class EnqueueEventWorker(appContext: Context, workerParams: WorkerParameters) : 
                     }
 
                     if (!recovered.isNullOrEmpty()) {
-                        // ensure we store digits-only phone
                         val recoveredNorm = recovered.filter { it.isDigit() }
                         eventMap["phoneNumber"] = if (recoveredNorm.isNotEmpty()) recoveredNorm else recovered
                         Log.d(TAG, "Recovered phoneNumber=$recovered for callId=$callId (attempts=${attempt + 1})")
@@ -81,12 +99,19 @@ class EnqueueEventWorker(appContext: Context, workerParams: WorkerParameters) : 
             val q = EventQueue(applicationContext)
             q.enqueue(eventMap)
             Log.d(TAG, "Enqueued event (fallback) -> $eventMap (queueSize=${q.size()})")
+            FirebaseCrashlytics.getInstance().log("Enqueued fallback event; queueSize=${q.size()}")
 
-            // schedule UploadWorker (same as CallService does)
-            UploadWorker.scheduleOnce(applicationContext)
+            // schedule UploadWorker (best-effort)
+            try {
+                UploadWorker.scheduleOnce(applicationContext)
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "Failed to schedule UploadWorker: ${e.localizedMessage}")
+            }
 
             Result.success()
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.e(TAG, "EnqueueEventWorker failed: ${e.localizedMessage}", e)
             Result.retry()
         }
@@ -137,6 +162,7 @@ class EnqueueEventWorker(appContext: Context, workerParams: WorkerParameters) : 
                 // else treat as too old, continue searching (there may be other keys)
             }
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "Error while looking up callId mapping: ${e.localizedMessage}")
         }
         return null

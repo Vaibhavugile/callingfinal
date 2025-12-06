@@ -3,6 +3,7 @@ plugins {
     id("com.google.gms.google-services") // FlutterFire / Google services
     id("kotlin-android")
     id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.firebase.crashlytics")
 }
 
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
@@ -76,6 +77,8 @@ dependencies {
     implementation("com.google.firebase:firebase-auth-ktx:22.1.1")
     implementation("com.google.firebase:firebase-firestore-ktx:24.6.1")
     implementation("com.google.firebase:firebase-storage-ktx:20.2.0")
+    implementation("com.google.firebase:firebase-crashlytics:18.4.1")
+    implementation("com.google.firebase:firebase-analytics:21.3.0")
 
     // WorkManager
     implementation("androidx.work:work-runtime-ktx:2.8.1")

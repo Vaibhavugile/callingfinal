@@ -17,6 +17,7 @@ import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -29,7 +30,20 @@ import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 import android.app.PendingIntent
 import android.content.ComponentName
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 
+/**
+ * CallService — responsible for tracking call state, persisting events and forwarding to Flutter.
+ *
+ * Important changes in this edited version:
+ *  - Ensures startForeground() is called immediately and defensively to avoid ForegroundServiceDidNotStartInTimeException.
+ *  - Adds a small foregroundStarted flag and a defensive attempt in onStartCommand() to guarantee startForeground().
+ *  - Uses NotificationCompat for wide compatibility.
+ *  - Retains original logic for call handling, call-log reading, queueing, and Crashlytics.
+ *
+ * Keep the service declared in AndroidManifest with foregroundServiceType as appropriate (phone)
+ * and ensure permissions are declared.
+ */
 class CallService : Service() {
 
     companion object {
@@ -37,7 +51,6 @@ class CallService : Service() {
         var eventSink: EventChannel.EventSink? = null
 
         // In-memory buffer of events that arrived while Flutter wasn't connected.
-        // Using a deque so we can flush in-order.
         val pendingEvents: ArrayDeque<Map<String, Any?>> = ArrayDeque()
 
         private const val TAG = "CallService"
@@ -52,21 +65,15 @@ class CallService : Service() {
         private const val KEY_LAST_OUTGOING = "last_outgoing_number"
         private const val KEY_LAST_OUTGOING_TS = "last_outgoing_ts"
 
-        // only keep a short lock window; we'll also make the lock conditional below
         private const val FINAL_LOCK_TTL_MS = 2500L
 
         private const val NOTIF_CHANNEL_ID = "call_channel"
         private const val NOTIF_CHANNEL_NAME = "Call Tracking"
         private const val NOTIF_ID = 1001
 
-        // NEW: reuse window + active TTL to support long calls (10-15min+)
-        private const val REUSE_WINDOW_MS = 120_000L            // 2 minutes fallback
-        private const val ACTIVE_CALL_TTL_MS = 60 * 60 * 1000L // 1 hour active TTL
+        private const val REUSE_WINDOW_MS = 120_000L
+        private const val ACTIVE_CALL_TTL_MS = 60 * 60 * 1000L // 1 hour
 
-        /**
-         * Flush any buffered pendingEvents into the current eventSink if available.
-         * This helper is safe to call multiple times and handles exceptions internally.
-         */
         fun flushPendingToSink() {
             try {
                 val sink = eventSink
@@ -75,7 +82,6 @@ class CallService : Service() {
                     return
                 }
 
-                // Drain the in-memory queue into sink (post to main thread).
                 synchronized(pendingEvents) {
                     if (pendingEvents.isEmpty()) {
                         Log.d(TAG, "flushPendingToSink: no in-memory pending events.")
@@ -92,19 +98,20 @@ class CallService : Service() {
                                 try {
                                     eventSink?.success(ev)
                                 } catch (e: Exception) {
+                                    FirebaseCrashlytics.getInstance().recordException(e)
                                     Log.e(TAG, "Error while flushing pending event to sink: ${e.localizedMessage}")
-                                    // If send fails, put it back to front of queue
                                     synchronized(pendingEvents) { pendingEvents.addFirst(ev) }
                                 }
                             }
                         } catch (e: Exception) {
+                            FirebaseCrashlytics.getInstance().recordException(e)
                             Log.e(TAG, "Error posting flush to main handler: ${e.localizedMessage}")
-                            // Put them back into pendingEvents if posting failed
                             synchronized(pendingEvents) { toFlush.reversed().forEach { pendingEvents.addFirst(it) } }
                         }
                     }
                 }
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.e(TAG, "flushPendingToSink error: ${e.localizedMessage}", e)
             }
         }
@@ -119,62 +126,108 @@ class CallService : Service() {
     private var legacyListener: CallStateListener? = null
     private var modernCallback: TelephonyCallback? = null
 
+    // Defensive flag to indicate whether startForeground has been executed successfully
+    @Volatile
+    private var foregroundStarted = false
+
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannelIfNeeded()
-        // start foreground with minimal static notification
-        startForeground(NOTIF_ID, buildNotification())
-        telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-        registerTelephonyCallback()
-        Log.d(TAG, "✅ Service created and listening.")
+        try {
+            FirebaseCrashlytics.getInstance().log("CallService.onCreate")
+            createNotificationChannelIfNeeded()
+
+            // Immediate minimal foreground notification — MUST be called quickly to avoid system kill on Android 12+
+            try {
+                startForegroundImmediate()
+                foregroundStarted = true
+                Log.d(TAG, "✅ Immediate startForeground() called in onCreate")
+            } catch (e: Exception) {
+                // Record and continue — we will attempt again in onStartCommand() if necessary
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "startForegroundImmediate failed in onCreate: ${e.localizedMessage}")
+            }
+
+            telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            registerTelephonyCallback()
+            Log.d(TAG, "✅ Service created and listening.")
+        } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.e(TAG, "Error in onCreate: ${e.localizedMessage}", e)
+        }
+    }
+
+    /**
+     * Defensive helper that builds a minimal notification and calls startForeground.
+     * Kept small and fast.
+     */
+    private fun startForegroundImmediate() {
+        val notif = buildMinimalNotification()
+        startForeground(NOTIF_ID, notif)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "➡️ onStartCommand extras=${intent?.extras}")
-        val event = intent?.getStringExtra("event")
-        val number = intent?.getStringExtra("phoneNumber")
-        val direction = intent?.getStringExtra("direction")
-        val callIdFromIntent = intent?.getStringExtra("callId")
-
-        if (event == "ended") {
-            Log.d(TAG, "Received 'ended' intent — deferring final result to call log (numberOverride=$number).")
-            readCallLogForLastCall(numberOverride = number, directionOverride = null, cooldown = true, retryCount = 0)
-            return START_STICKY
-        }
-
-        if (!number.isNullOrEmpty() && !direction.isNullOrEmpty()) {
-            currentCallNumber = number
-            if (currentCallDirection == null || currentCallDirection == "unknown") {
-                currentCallDirection = direction
-            } else {
-                if (currentCallDirection != "outbound") {
-                    currentCallDirection = direction
+        FirebaseCrashlytics.getInstance().log("CallService.onStartCommand extras=${intent?.extras}")
+        try {
+            // Defensive re-check: if for some reason the OS didn't see our startForeground() earlier,
+            // attempt to call it again immediately to satisfy the 5s requirement.
+            if (!foregroundStarted) {
+                try {
+                    startForegroundImmediate()
+                    foregroundStarted = true
+                    Log.d(TAG, "✅ startForeground() re-attempt in onStartCommand succeeded")
+                } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
+                    Log.w(TAG, "startForeground re-attempt failed in onStartCommand: ${e.localizedMessage}")
                 }
             }
 
-            if (event == "outgoing_start") {
-                val payload = mapOf<String, Any?>(
-                    "phoneNumber" to number,
-                    "direction" to "outbound",
-                    "outcome" to "outgoing_start",
-                    "timestamp" to System.currentTimeMillis(),
-                    "durationInSeconds" to null,
-                    "callId" to callIdFromIntent
-                )
-                Log.d(TAG, "DEBUG: Immediate forward outbound -> $payload")
-                // Persist & forward
-                persistAndForwardEvent(payload)
-            } else if (event != null && event != "state_change") {
-                // other immediate event (e.g., answered)
-                sendCallEvent(number, currentCallDirection ?: direction, "answered", System.currentTimeMillis(), null)
-            }
-        }
+            Log.d(TAG, "➡️ onStartCommand extras=${intent?.extras}")
+            val event = intent?.getStringExtra("event")
+            val number = intent?.getStringExtra("phoneNumber")
+            val direction = intent?.getStringExtra("direction")
+            val callIdFromIntent = intent?.getStringExtra("callId")
 
+            if (event == "ended") {
+                Log.d(TAG, "Received 'ended' intent — deferring final result to call log (numberOverride=$number).")
+                readCallLogForLastCall(numberOverride = number, directionOverride = null, cooldown = true, retryCount = 0)
+                return START_STICKY
+            }
+
+            if (!number.isNullOrEmpty() && !direction.isNullOrEmpty()) {
+                currentCallNumber = number
+                if (currentCallDirection == null || currentCallDirection == "unknown") {
+                    currentCallDirection = direction
+                } else {
+                    if (currentCallDirection != "outbound") {
+                        currentCallDirection = direction
+                    }
+                }
+
+                if (event == "outgoing_start") {
+                    val payload = mapOf<String, Any?>(
+                        "phoneNumber" to number,
+                        "direction" to "outbound",
+                        "outcome" to "outgoing_start",
+                        "timestamp" to System.currentTimeMillis(),
+                        "durationInSeconds" to null,
+                        "callId" to callIdFromIntent
+                    )
+                    Log.d(TAG, "DEBUG: Immediate forward outbound -> $payload")
+                    persistAndForwardEvent(payload)
+                } else if (event != null && event != "state_change") {
+                    sendCallEvent(number, currentCallDirection ?: direction, "answered", System.currentTimeMillis(), null)
+                }
+            }
+        } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.e(TAG, "Error in onStartCommand: ${e.localizedMessage}", e)
+        }
         return START_STICKY
     }
 
     private fun registerTelephonyCallback() {
         try {
+            FirebaseCrashlytics.getInstance().log("CallService.registerTelephonyCallback")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 modernCallback = CallStateCallback(this)
                 telephonyManager.registerTelephonyCallback(mainExecutor, modernCallback as CallStateCallback)
@@ -187,12 +240,14 @@ class CallService : Service() {
                 Log.d(TAG, "✅ Registered PhoneStateListener (API < S)")
             }
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.e(TAG, "Error registering telephony callback: ${e.localizedMessage}", e)
         }
     }
 
     private fun unregisterTelephonyCallback() {
         try {
+            FirebaseCrashlytics.getInstance().log("CallService.unregisterTelephonyCallback")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 modernCallback?.let {
                     telephonyManager.unregisterTelephonyCallback(it)
@@ -208,6 +263,7 @@ class CallService : Service() {
                 }
             }
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.e(TAG, "Error unregistering telephony callback: ${e.localizedMessage}", e)
         }
     }
@@ -228,48 +284,32 @@ class CallService : Service() {
         return sa == sb
     }
 
-    /**
-     * Ensure we have a callId for the given normalized phone. Lookup-first: reuse existing mapping
-     * if present; otherwise create and persist a new mapping.
-     *
-     * NOTE: ensureCallIdForPhone now marks the mapping active (sets active-until) so it is reused
-     * for the duration of the call. It still returns the existing mapping if present.
-     */
     private fun ensureCallIdForPhone(normalizedPhone: String?, prefs: SharedPreferences): String? {
         try {
             if (normalizedPhone.isNullOrEmpty()) return null
             val existing = prefs.getString("callid_$normalizedPhone", null)
             if (!existing.isNullOrEmpty()) {
-                // backfill timestamp if missing
                 val ts = prefs.getLong("callid_ts_$normalizedPhone", 0L)
                 if (ts == 0L) prefs.edit().putLong("callid_ts_$normalizedPhone", System.currentTimeMillis()).apply()
                 return existing
             }
 
             val newId = generateCallId()
-            // Use markCallActiveForPhone which sets id, ts and active-until
             markCallActiveForPhone(applicationContext, normalizedPhone, newId)
             Log.d(TAG, "Saved callId marker for $normalizedPhone -> $newId (ensureCallIdForPhone)")
             return newId
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "ensureCallIdForPhone failed: ${e.localizedMessage}")
         }
         return null
     }
 
-    /**
-     * Persist event to on-device queue and attempt to forward to Flutter.
-     * Also schedules WorkManager UploadWorker to ensure eventual upload to Firestore.
-     *
-     * Improvement: lookup existing callId for phone before generating a new one. This reduces
-     * multiple callId creation for the same physical call when multiple components race.
-     */
     private fun persistAndForwardEvent(payload: Map<String, Any?>) {
         try {
-            // Make a mutable copy so we can enrich it
+            FirebaseCrashlytics.getInstance().log("persistAndForwardEvent called for phone=${payload["phoneNumber"]}")
             val mutable = payload.toMutableMap()
 
-            // --- NEW: attach tenantId from SharedPreferences (if present) ---
             try {
                 val prefsLocal = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val tenantId = prefsLocal.getString("tenantId", null)
@@ -277,27 +317,23 @@ class CallService : Service() {
                     mutable["tenantId"] = tenantId
                     Log.d(TAG, "Attached tenantId=$tenantId to event for phone=${mutable["phoneNumber"]}")
                 } else {
-                    // defensive: mark event for review later if no tenant set (helps migration/debug)
                     mutable["needsTenantReview"] = true
                     Log.w(TAG, "No tenantId in prefs – event marked needsTenantReview for phone=${mutable["phoneNumber"]}")
                 }
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.w(TAG, "Error while reading tenantId from prefs: ${e.localizedMessage}")
             }
-            // --- END tenant attach ---
 
-            // Ensure phone normalized
             val phoneRaw = (mutable["phoneNumber"] as? String)
             val normalizedPhone = normalizeNumber(phoneRaw) ?: phoneRaw
 
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-            // If callId missing, try to reuse existing mapping before generating
             var callId = mutable["callId"] as? String
             if (callId.isNullOrEmpty()) {
                 try {
                     if (!normalizedPhone.isNullOrEmpty()) {
-                        // NEW: prefer active-or-recent mapping
                         val existing = readActiveOrRecentCallId(applicationContext, normalizedPhone)
                         if (!existing.isNullOrEmpty()) {
                             callId = existing
@@ -306,18 +342,17 @@ class CallService : Service() {
                         }
                     }
                 } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.w(TAG, "Error checking existing callId marker: ${e.localizedMessage}")
                 }
             }
 
             if (callId.isNullOrEmpty()) {
-                // No existing mapping found — create one (or fallback to reverse mapping for raw phone)
                 callId = ensureCallIdForPhone(normalizedPhone, prefs) ?: generateCallId()
                 mutable["callId"] = callId
                 try {
                     val markerKey = if (!normalizedPhone.isNullOrEmpty()) normalizedPhone else (phoneRaw ?: "")
                     if (markerKey.isNotEmpty()) {
-                        // Use markCallActiveForPhone instead of manual puts
                         markCallActiveForPhone(applicationContext, markerKey, callId)
                         Log.d(TAG, "Saved callId marker for $markerKey -> $callId (persistAndForwardEvent)")
                     } else {
@@ -325,10 +360,10 @@ class CallService : Service() {
                         Log.d(TAG, "Saved reverse callId mapping only for callId=$callId")
                     }
                 } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.w(TAG, "Failed saving callId marker in persistAndForwardEvent: ${e.localizedMessage}")
                 }
             } else {
-                // If callId present, ensure reverse mapping exists
                 try {
                     val existing = prefs.getString("callid_to_phone_$callId", null)
                     if (existing.isNullOrEmpty() && !normalizedPhone.isNullOrEmpty()) {
@@ -336,16 +371,16 @@ class CallService : Service() {
                         Log.d(TAG, "Backfilled reverse mapping for callId=$callId -> $normalizedPhone")
                     }
                 } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.w(TAG, "Failed ensuring reverse mapping exists: ${e.localizedMessage}")
                 }
             }
 
-            // Persist to EventQueue (durable)
             val q = EventQueue(applicationContext)
             q.enqueue(mutable)
             Log.d(TAG, "Persisted event to EventQueue. queueSize=${q.size()} payload=$mutable")
+            FirebaseCrashlytics.getInstance().log("Persisted event to EventQueue (phone=${mutable["phoneNumber"]})")
 
-            // Schedule WorkManager upload (ensures eventual delivery)
             val workRequest = OneTimeWorkRequestBuilder<UploadWorker>()
                 .setConstraints(
                     Constraints.Builder()
@@ -357,7 +392,6 @@ class CallService : Service() {
 
             WorkManager.getInstance(applicationContext).enqueue(workRequest)
 
-            // Update notification for key outcomes (outgoing_start, answered, ended, missed, rejected)
             try {
                 val outcome = (mutable["outcome"] as? String) ?: ""
                 val phone = (mutable["phoneNumber"] as? String) ?: ""
@@ -378,20 +412,24 @@ class CallService : Service() {
                             "rejected" -> "Rejected"
                             else -> "Call ended"
                         })
-                        // auto-clear shortly
                         mainHandler.postDelayed({ clearCallNotification() }, 1500)
                     }
                 }
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.w(TAG, "Failed to update notification for event: ${e.localizedMessage}")
             }
 
-            // Forward to Flutter if connected; otherwise buffer in-memory for flush later
             sendToFlutterOrBuffer(mutable)
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.e(TAG, "Error persisting/forwarding event: ${e.localizedMessage}", e)
-            // Still attempt to buffer for UI
-            sendToFlutterOrBuffer(payload)
+            try {
+                sendToFlutterOrBuffer(payload)
+            } catch (ex: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(ex)
+                Log.e(TAG, "Failed to buffer payload after persist error: ${ex.localizedMessage}", ex)
+            }
         }
     }
 
@@ -402,7 +440,6 @@ class CallService : Service() {
                 Log.w(TAG, "⚠️ Flutter not connected yet → buffering pending event (in-memory)")
                 synchronized(pendingEvents) {
                     pendingEvents.addLast(payload)
-                    // cap queue length to prevent unbounded growth
                     if (pendingEvents.size > 200) pendingEvents.removeFirst()
                 }
             } else {
@@ -410,19 +447,21 @@ class CallService : Service() {
                     try {
                         eventSink?.success(payload)
                     } catch (e: Exception) {
+                        FirebaseCrashlytics.getInstance().recordException(e)
                         Log.e(TAG, "Error sending event to flutter: ${e.localizedMessage}")
-                        // buffer if sending fails
                         synchronized(pendingEvents) { pendingEvents.addLast(payload) }
                     }
                 }
             }
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.e(TAG, "sendToFlutterOrBuffer error: ${e.localizedMessage}")
             synchronized(pendingEvents) { pendingEvents.addLast(payload) }
         }
     }
 
     fun handleCallStateUpdate(state: Int, incomingNumber: String?) {
+        FirebaseCrashlytics.getInstance().log("handleCallStateUpdate state=${stateToName(state)} incoming=$incomingNumber")
         Log.d(TAG, "📞 Listener State Change: ${stateToName(state)} (Incoming: $incomingNumber)")
 
         if (state == TelephonyManager.CALL_STATE_IDLE && System.currentTimeMillis() < lastCallEndTime + CALL_COOLDOWN_MS) {
@@ -450,7 +489,8 @@ class CallService : Service() {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error reading outgoing marker early: ${e.localizedMessage}")
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.e(TAG, "Error reading outgoing marker early: ${e.localizedMessage}", e)
         }
 
         when (state) {
@@ -511,7 +551,9 @@ class CallService : Service() {
         cooldown: Boolean = false,
         retryCount: Int = 0
     ) {
+        FirebaseCrashlytics.getInstance().log("readCallLogForLastCall start numberOverride=$numberOverride directionOverride=$directionOverride retry=$retryCount")
         if (checkSelfPermission(android.Manifest.permission.READ_CALL_LOG) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            FirebaseCrashlytics.getInstance().log("READ_CALL_LOG permission not granted; using fallback if available")
             Log.e(TAG, "❌ READ_CALL_LOG permission not granted for failsafe.")
             val outgoing = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LAST_OUTGOING, null)
             val fallbackNumber = numberOverride ?: outgoing
@@ -533,13 +575,19 @@ class CallService : Service() {
                 val selectionArgs = arrayOf(recentWindowMs.toString())
                 val limitUri = CallLog.Calls.CONTENT_URI.buildUpon().appendQueryParameter("limit", "20").build()
 
-                cursor = contentResolver.query(
-                    limitUri,
-                    arrayOf(CallLog.Calls._ID, CallLog.Calls.NUMBER, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION),
-                    selection,
-                    selectionArgs,
-                    "${CallLog.Calls.DATE} DESC"
-                )
+                cursor = try {
+                    contentResolver.query(
+                        limitUri,
+                        arrayOf(CallLog.Calls._ID, CallLog.Calls.NUMBER, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION),
+                        selection,
+                        selectionArgs,
+                        "${CallLog.Calls.DATE} DESC"
+                    )
+                } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
+                    Log.w(TAG, "CallLog query threw exception: ${e.localizedMessage}")
+                    null
+                }
 
                 if (cursor == null || cursor.count == 0) {
                     Log.w(TAG, "Call log query returned empty or null.")
@@ -582,6 +630,7 @@ class CallService : Service() {
                     }
 
                     Log.w(TAG, "🚨 Call Log Result (picked): $outcome ($direction) to $num, Duration: $dur ts:$ts")
+                    FirebaseCrashlytics.getInstance().log("CallLog picked: outcome=$outcome direction=$direction num=$num dur=$dur")
                     emitFinalCallEventIfNotLocked(num, outcome, ts, dur, direction)
                 } else {
                     Log.w(TAG, "No suitable call-log row found after retries.")
@@ -595,7 +644,8 @@ class CallService : Service() {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error reading Call Log: $e")
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.e(TAG, "❌ Error reading Call Log: ${e.localizedMessage}", e)
                 val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val outgoing = prefs.getString(KEY_LAST_OUTGOING, null)
                 val fallbackNumber = numberOverride ?: outgoing
@@ -606,7 +656,12 @@ class CallService : Service() {
                     Log.w(TAG, "No number available to emit final after error; skipping fallback.")
                 }
             } finally {
-                cursor?.close()
+                try {
+                    cursor?.close()
+                } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
+                    Log.w(TAG, "Failed to close call log cursor: ${e.localizedMessage}")
+                }
             }
         }, delay)
     }
@@ -624,6 +679,7 @@ class CallService : Service() {
                 val dur = cursor.getInt(cursor.getColumnIndexOrThrow(CallLog.Calls.DURATION))
                 rows.add(_RowPick(number, type, ts, dur))
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
             }
         } while (cursor.moveToNext())
 
@@ -659,12 +715,6 @@ class CallService : Service() {
         }
     }
 
-    /**
-     * Emit final call event but avoid applying it if a short-term lock is active.
-     *
-     * CHANGE: only create the finalization lock when the event includes an authoritative duration.
-     * This prevents provisional/no-duration finals from blocking later authoritative call-log updates.
-     */
     private fun emitFinalCallEventIfNotLocked(phoneNumber: String, finalOutcome: String, timestampMs: Long, durationSec: Int?, directionOverride: String? = null) {
         val normalized = normalizeNumber(phoneNumber) ?: ""
         if (normalized.isEmpty()) {
@@ -676,19 +726,15 @@ class CallService : Service() {
         val lockedUntil = prefs.getLong(lockKey, 0L)
         val now = System.currentTimeMillis()
 
-        // If there is a lock and it's still valid -> skip
         if (now < lockedUntil) {
             Log.d(TAG, "Finalization for $normalized currently locked until $lockedUntil — skipping.")
             return
         }
 
-        // IMPORTANT: Only set the guard lock when this final is authoritative (contains duration).
-        // This prevents provisional saves (no duration) from preventing later authoritative call-log updates.
         if (durationSec != null) {
             prefs.edit().putLong(lockKey, now + FINAL_LOCK_TTL_MS).apply()
             Log.d(TAG, "Placed finalization lock for $normalized until ${now + FINAL_LOCK_TTL_MS}")
         } else {
-            // Ensure any older lock doesn't persist longer than TTL; remove it to be safe.
             prefs.edit().remove(lockKey).apply()
         }
 
@@ -730,16 +776,15 @@ class CallService : Service() {
         )
 
         Log.d(TAG, "📤 Emitting final event: $payload")
-        // Persist to queue and forward to Flutter (or buffer)
+        FirebaseCrashlytics.getInstance().log("Emitting final event payload for $normalized outcome=$finalOutcome duration=$durationSec")
         persistAndForwardEvent(payload)
 
-        // record last-final meta
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong(lastFinalKey, timestampMs).putInt(lastDurKey, durationSec ?: -1).apply()
 
-        // Clear transient mapping so subsequent calls get a fresh callId
         try {
             clearCallIdMapping(applicationContext, phoneNumber)
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "Failed to clear callId mapping after finalization: ${e.localizedMessage}")
         }
     }
@@ -753,6 +798,7 @@ class CallService : Service() {
             "durationInSeconds" to durationInSeconds,
         )
         Log.d(TAG, "📤 Sending event to Flutter (and persisting): $data")
+        FirebaseCrashlytics.getInstance().log("sendCallEvent for phone=${number} outcome=${outcome}")
         persistAndForwardEvent(data)
     }
 
@@ -764,112 +810,124 @@ class CallService : Service() {
         return Pair(num, ts)
     }
 
-    private fun buildNotification(): Notification {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, NOTIF_CHANNEL_ID)
-                .setContentTitle("Call Tracking Running")
-                .setContentText("Detecting call events")
-                .setSmallIcon(android.R.drawable.sym_call_incoming)
-                .setOngoing(true)
-                .build()
+    // Build a minimal notification used immediately at service start
+    private fun buildMinimalNotification(): Notification {
+        val title = "Call tracking"
+        val content = "Preparing…"
+
+        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         } else {
-            Notification.Builder(this)
-                .setContentTitle("Call Tracking Running")
-                .setContentText("Detecting call events")
-                .setSmallIcon(android.R.drawable.sym_call_incoming)
-                .setOngoing(true)
-                .build()
+            PendingIntent.FLAG_UPDATE_CURRENT
         }
+
+        val launch = packageManager.getLaunchIntentForPackage(packageName)
+        val pending = if (launch != null) PendingIntent.getActivity(this, 0, launch, pendingFlags) else null
+
+        return NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(content)
+            .setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setOngoing(true)
+            .setContentIntent(pending)
+            .build()
+    }
+
+    private fun buildNotification(): Notification {
+        return NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
+            .setContentTitle("Call Tracking Running")
+            .setContentText("Detecting call events")
+            .setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setOngoing(true)
+            .build()
     }
 
     private fun createNotificationChannelIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
                 val channel = NotificationChannel(NOTIF_CHANNEL_ID, NOTIF_CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW)
-                getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+                channel.setShowBadge(false)
+                val nm = getSystemService(NotificationManager::class.java)
+                nm.createNotificationChannel(channel)
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.e(TAG, "Error creating notification channel: ${e.localizedMessage}")
             }
         }
     }
 
-    // ---------- Notification helpers ----------
     private fun showOrUpdateCallNotification(phone: String, direction: String, statusText: String) {
-    try {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val title = when (direction) {
-            "outbound", "outgoing" -> "Outgoing: $phone"
-            "inbound", "incoming" -> "Incoming: $phone"
-            else -> phone
-        }
-        val content = statusText
-
-        // Build intent to open MainActivity and forward open_lead_phone
-        val targetIntent = Intent(this, com.example.call_leads_app.MainActivity::class.java).apply {
-            putExtra("open_lead_phone", phone)
-            // SingleTop + ClearTop so onNewIntent will be called if activity already exists
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-
-        // PendingIntent flags: use MUTABLE for Android 12+ only if necessary, else UPDATE_CURRENT
-        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-
-        val pending = PendingIntent.getActivity(this, /*requestCode=*/ phone.hashCode(), targetIntent, pendingFlags)
-
-        val notif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, NOTIF_CHANNEL_ID)
-                .setContentTitle(title)
-                .setContentText(content)
-                .setSmallIcon(android.R.drawable.sym_call_outgoing)
-                .setContentIntent(pending)
-                .setAutoCancel(true)
-                .setOngoing(true)
-                .build()
-        } else {
-            Notification.Builder(this)
-                .setContentTitle(title)
-                .setContentText(content)
-                .setSmallIcon(android.R.drawable.sym_call_outgoing)
-                .setContentIntent(pending)
-                .setAutoCancel(true)
-                .setOngoing(true)
-                .build()
-        }
-
-        nm.notify(NOTIF_ID, notif)
-        Log.d(TAG, "Notification shown/updated: $title — $content (tap opens MainActivity with phone)")
-    } catch (e: Exception) {
-        Log.w(TAG, "showOrUpdateCallNotification failed: ${e.localizedMessage}")
-    }
-}
-   private fun clearCallNotification() {
-    try {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.cancel(NOTIF_ID)
-        // restart minimal foreground notification so service remains running
         try {
-            startForeground(NOTIF_ID, buildNotification())
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to restart foreground after clearing: ${e.localizedMessage}")
-        }
-        Log.d(TAG, "Cleared call notification")
-    } catch (e: Exception) {
-        Log.w(TAG, "clearCallNotification failed: ${e.localizedMessage}")
-    }
-}
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val title = when (direction) {
+                "outbound", "outgoing" -> "Outgoing: $phone"
+                "inbound", "incoming" -> "Incoming: $phone"
+                else -> phone
+            }
+            val content = statusText
 
-    // ---------- end notification helpers ----------
+            val targetIntent = Intent(this, com.example.call_leads_app.MainActivity::class.java).apply {
+                putExtra("open_lead_phone", phone)
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+
+            val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+
+            val pending = PendingIntent.getActivity(this, /*requestCode=*/ phone.hashCode(), targetIntent, pendingFlags)
+
+            val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(content)
+                .setSmallIcon(android.R.drawable.sym_call_outgoing)
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .setOngoing(true)
+                .build()
+
+            nm.notify(NOTIF_ID, notif)
+            Log.d(TAG, "Notification shown/updated: $title — $content (tap opens MainActivity with phone)")
+        } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "showOrUpdateCallNotification failed: ${e.localizedMessage}")
+        }
+    }
+
+    private fun clearCallNotification() {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(NOTIF_ID)
+            try {
+                // keep the minimal foreground notification running so the service isn't considered background
+                startForeground(NOTIF_ID, buildNotification())
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "Failed to restart foreground after clearing: ${e.localizedMessage}")
+            }
+            Log.d(TAG, "Cleared call notification")
+        } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "clearCallNotification failed: ${e.localizedMessage}")
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        unregisterTelephonyCallback()
-        super.onDestroy()
-        Log.d(TAG, "🛑 Service destroyed")
+        try {
+            FirebaseCrashlytics.getInstance().log("CallService.onDestroy")
+            unregisterTelephonyCallback()
+        } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "Error during onDestroy: ${e.localizedMessage}")
+        } finally {
+            super.onDestroy()
+            Log.d(TAG, "🛑 Service destroyed")
+        }
     }
 
     private fun stateToName(state: Int): String {
@@ -885,9 +943,6 @@ class CallService : Service() {
         return "call_" + java.util.UUID.randomUUID().toString().replace("-", "").take(12)
     }
 
-    // -----------------------
-    // New helpers for callId lifecycle
-    // -----------------------
     private fun markCallActiveForPhone(ctx: Context, phoneDigitsOrRaw: String, callId: String) {
         try {
             val normalized = normalizeNumber(phoneDigitsOrRaw) ?: phoneDigitsOrRaw
@@ -900,7 +955,9 @@ class CallService : Service() {
                 .putString("callid_to_phone_$callId", normalized)
                 .apply()
             Log.d(TAG, "Marked call active for $normalized -> $callId until ${now + ACTIVE_CALL_TTL_MS}")
+            FirebaseCrashlytics.getInstance().log("markCallActiveForPhone written for $normalized")
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "markCallActiveForPhone failed: ${e.localizedMessage}")
         }
     }
@@ -912,23 +969,23 @@ class CallService : Service() {
             val id = prefs.getString("callid_$normalized", null) ?: return null
             val now = System.currentTimeMillis()
 
-            // check explicit active-until marker first
             val activeUntil = prefs.getLong("callid_active_until_$normalized", 0L)
             if (activeUntil > now) {
                 Log.d(TAG, "Reusing ACTIVE callId for $normalized -> $id (activeUntil=$activeUntil)")
+                FirebaseCrashlytics.getInstance().log("Reusing ACTIVE callId for $normalized")
                 return id
             }
 
-            // fallback: allow short reuse window if active marker expired but ts is recent
             val ts = prefs.getLong("callid_ts_$normalized", 0L)
             if (ts != 0L && (now - ts) <= REUSE_WINDOW_MS) {
                 Log.d(TAG, "Reusing RECENT callId for $normalized -> $id (ts=$ts)")
+                FirebaseCrashlytics.getInstance().log("Reusing RECENT callId for $normalized")
                 return id
             }
 
-            // too old / not active
             return null
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "readActiveOrRecentCallId failed: ${e.localizedMessage}")
             return null
         }
@@ -944,7 +1001,9 @@ class CallService : Service() {
                 .remove("callid_active_until_$normalized")
                 .apply()
             Log.d(TAG, "Cleared callId mapping for $normalized")
+            FirebaseCrashlytics.getInstance().log("Cleared callId mapping for $normalized")
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "clearCallIdMapping failed: ${e.localizedMessage}")
         }
     }

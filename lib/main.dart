@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 
@@ -15,12 +16,15 @@ import 'screens/oem_settings_screen.dart';
 import 'services/auth_service.dart';
 import 'services/permissions_service.dart';
 
-const MethodChannel _nativeChannel = MethodChannel('com.example.call_leads_app/native');
+const MethodChannel _nativeChannel =
+    MethodChannel('com.example.call_leads_app/native');
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize Firebase before constructing anything that might use it.
+  // -------------------------------------------------------------
+  // 1) Initialize Firebase
+  // -------------------------------------------------------------
   try {
     await Firebase.initializeApp();
     debugPrint('✅ Firebase.initializeApp() completed.');
@@ -28,7 +32,30 @@ void main() async {
     debugPrint('❌ Firebase.initializeApp() failed: $e\n$st');
   }
 
-  // Pre-warm SharedPreferences and log current tenant for quick verification.
+  // -------------------------------------------------------------
+  // 2) Setup Crashlytics forwarding for framework errors
+  // -------------------------------------------------------------
+  FlutterError.onError = (FlutterErrorDetails details) {
+    // Forward Flutter framework errors to Crashlytics
+    FirebaseCrashlytics.instance.recordFlutterFatalError(details);
+  };
+
+  // Optional: send a non-fatal event on startup to test Crashlytics
+  // (Comment this out after verifying Crashlytics is working)
+  try {
+    FirebaseCrashlytics.instance.recordError(
+      Exception("TEST_STARTUP_EVENT_FROM_MAIN.DART"),
+      StackTrace.current,
+      fatal: false,
+    );
+    debugPrint("📡 Sent test Crashlytics startup event.");
+  } catch (e) {
+    debugPrint("⚠️ Crashlytics test event failed to send: $e");
+  }
+
+  // -------------------------------------------------------------
+  // 3) Pre-warm SharedPreferences
+  // -------------------------------------------------------------
   try {
     final prefs = await SharedPreferences.getInstance();
     final tenant = prefs.getString('tenantId') ?? '<not-set>';
@@ -37,7 +64,9 @@ void main() async {
     debugPrint('⚠️ Could not read SharedPreferences on startup: $e');
   }
 
-  // Early attempt to flush native pending events (non-fatal)
+  // -------------------------------------------------------------
+  // 4) Early native event flush
+  // -------------------------------------------------------------
   try {
     await _nativeChannel.invokeMethod('flushPendingEvents');
     debugPrint('🔁 Requested native flushPendingEvents()');
@@ -45,7 +74,23 @@ void main() async {
     debugPrint('ℹ️ flushPendingEvents not available or failed: $e');
   }
 
-  runApp(MyApp());
+  // -------------------------------------------------------------
+  // 5) Run app inside a guarded zone so uncaught async errors are reported
+  // -------------------------------------------------------------
+  runZonedGuarded<Future<void>>(
+    () async {
+      runApp(MyApp());
+    },
+    (error, stack) {
+      try {
+        FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+      } catch (e) {
+        // If Crashlytics fails for some reason, still print to console.
+        debugPrint('⚠️ Failed to send error to Crashlytics: $e');
+        debugPrint('Original error: $error\n$stack');
+      }
+    },
+  );
 }
 
 class MyApp extends StatefulWidget {
@@ -65,48 +110,46 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
     _callHandler = CallEventHandler(navigatorKey: navigatorKey);
 
-    // Run permission onboarding after first frame so dialogs don't conflict with startup UI
+    // -------------------------------------------------------------
+    // Runtime permissions & OEM settings onboarding
+    // -------------------------------------------------------------
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
-        // Ask runtime permissions (rationale shown once per permission inside PermissionsService)
-        await PermissionsService.ensureAllPermissions(navigatorKey.currentContext ?? context);
-        debugPrint('🔔 Permissions flow completed (or dismissed by user).');
+        await PermissionsService.ensureAllPermissions(
+            navigatorKey.currentContext ?? context);
+        debugPrint('🔔 Permissions flow completed.');
 
-        // If device likely needs OEM settings (overlay/autostart/battery), show the friendly OEM settings screen ONCE.
         final needs = await PermissionsService.needsOemSettings();
         final prefs = await SharedPreferences.getInstance();
         final shown = prefs.getBool('oem_settings_shown') ?? false;
 
         if (needs && !shown) {
-          // show a full-screen helper for the user to follow steps
           await Navigator.of(navigatorKey.currentContext ?? context).push(
             MaterialPageRoute(builder: (_) => const OemSettingsScreen()),
           );
-
-          // mark shown once user navigates back
           await prefs.setBool('oem_settings_shown', true);
         }
       } catch (e) {
-        debugPrint('⚠️ Permissions or OEM flow error: $e');
+        debugPrint('⚠️ Permissions/OEM flow error: $e');
       }
     });
 
-    // Monitor Firebase auth state
-    _authSub = FirebaseAuth.instance.authStateChanges().listen((User? user) async {
-      debugPrint("🔐 authStateChanges() => uid=${user?.uid}, email=${user?.email}");
+    // -------------------------------------------------------------
+    // Firebase Authentication listener
+    // -------------------------------------------------------------
+    _authSub =
+        FirebaseAuth.instance.authStateChanges().listen((User? user) async {
+      debugPrint("🔐 authStateChanges() => uid=${user?.uid}");
 
       if (user != null) {
-        // user logged in
         debugPrint("➡️ User signed in: ${user.uid}");
 
-        // ensure tenant synced locally + to native
         try {
           await _ensureTenantSyncedForUser(user.uid);
         } catch (e) {
           debugPrint("⚠️ Tenant sync error: $e");
         }
 
-        // start call handler
         try {
           Future.microtask(() => _callHandler.startListening());
         } catch (e) {
@@ -135,14 +178,13 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     debugPrint("📱 Lifecycle state changed: $state");
 
-    if (state == AppLifecycleState.resumed) {
-      if (FirebaseAuth.instance.currentUser != null) {
-        debugPrint("🔄 Resumed — reattaching CallEventHandler.");
-        try {
-          _callHandler.startListening();
-        } catch (e) {
-          debugPrint("❌ startListening on resume failed: $e");
-        }
+    if (state == AppLifecycleState.resumed &&
+        FirebaseAuth.instance.currentUser != null) {
+      debugPrint("🔄 Resumed — reattaching CallEventHandler.");
+      try {
+        _callHandler.startListening();
+      } catch (e) {
+        debugPrint("❌ startListening on resume failed: $e");
       }
     }
   }
@@ -156,17 +198,18 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
-          final user = snapshot.data;
-
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Scaffold(body: Center(child: CircularProgressIndicator()));
+            return const Scaffold(
+                body: Center(child: CircularProgressIndicator()));
           }
+
+          final user = snapshot.data;
 
           if (user == null) {
             debugPrint("🧭 Navigating to LoginScreen");
             return LoginScreen();
           } else {
-            debugPrint("🧭 Navigating to HomeScreen for uid=${user.uid}");
+            debugPrint("🧭 Navigating to HomeScreen (uid=${user.uid})");
             return HomeScreen();
           }
         },
@@ -174,7 +217,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     );
   }
 
-  /// Ensure tenantId is present in SharedPreferences & native preferences.
+  // -------------------------------------------------------------
+  // Sync tenantId to SharedPreferences + Native layer
+  // -------------------------------------------------------------
   Future<void> _ensureTenantSyncedForUser(String uid) async {
     debugPrint("🔍 Checking tenant sync for uid=$uid");
 
@@ -195,22 +240,19 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     }
 
     final tenant = (profile["tenantId"] as String?)?.trim();
-
     if (tenant == null || tenant.isEmpty) {
-      debugPrint("ℹ️ userProfiles/$uid has NO tenantId assigned.");
+      debugPrint("ℹ️ userProfiles/$uid has NO tenantId.");
       return;
     }
 
-    // store to prefs
     await prefs.setString("tenantId", tenant);
     debugPrint("✅ Stored tenantId in SharedPreferences → $tenant");
 
-    // store to native
     try {
       await _nativeChannel.invokeMethod("setTenantId", {"tenantId": tenant});
       debugPrint("✅ Synced tenantId to native layer → $tenant");
     } catch (e) {
-      debugPrint("⚠️ Failed to sync tenantId to native prefs: $e");
+      debugPrint("⚠️ Native tenant sync failed: $e");
     }
   }
 }

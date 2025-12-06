@@ -6,6 +6,7 @@ import android.telecom.CallRedirectionService
 import android.telecom.PhoneAccountHandle
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 import java.util.UUID
 
 class MyCallRedirectionService : CallRedirectionService() {
@@ -22,6 +23,7 @@ class MyCallRedirectionService : CallRedirectionService() {
     private val CALL_SERVICE_CLASS_NAME = "com.example.call_leads_app.callservice.CallService"
 
     override fun onPlaceCall(handle: Uri, phoneAccount: PhoneAccountHandle, allowInteractiveResponse: Boolean) {
+        FirebaseCrashlytics.getInstance().log("MyCallRedirectionService.onPlaceCall triggered")
         try {
             val phoneNumber = handle.schemeSpecificPart
             Log.d(TAG, "onPlaceCall: $phoneNumber")
@@ -32,26 +34,49 @@ class MyCallRedirectionService : CallRedirectionService() {
             val normalized = normalizeNumber(phoneNumber) ?: phoneNumber
 
             // save outgoing marker
-            prefs.edit()
-                .putString(KEY_LAST_OUTGOING, normalized)
-                .putLong(KEY_LAST_OUTGOING_TS, System.currentTimeMillis())
-                .apply()
-            Log.d(TAG, "Saved outgoing marker for $normalized")
+            try {
+                prefs.edit()
+                    .putString(KEY_LAST_OUTGOING, normalized)
+                    .putLong(KEY_LAST_OUTGOING_TS, System.currentTimeMillis())
+                    .apply()
+                FirebaseCrashlytics.getInstance().log("Saved outgoing marker for $normalized")
+                Log.d(TAG, "Saved outgoing marker for $normalized")
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "Failed to save outgoing marker: ${e.localizedMessage}")
+            }
 
             // lookup-first: reuse callId if exists (active-or-recent), otherwise create & mark active
-            val existing = readActiveOrRecentCallId(this, normalized)
-            val callId = existing ?: ensureCallIdForPhone(this, normalized)
+            val existing = try {
+                readActiveOrRecentCallId(this, normalized)
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "readActiveOrRecentCallId threw: ${e.localizedMessage}")
+                null
+            }
+
+            val callId = try {
+                existing ?: ensureCallIdForPhone(this, normalized)
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "ensureCallIdForPhone threw: ${e.localizedMessage}")
+                generateCallId()
+            }
 
             if (existing != null) {
                 Log.d(TAG, "Reused existing callId for $normalized -> $existing")
+                FirebaseCrashlytics.getInstance().log("Reused callId for $normalized")
             } else {
                 Log.d(TAG, "Saved callId marker for $normalized -> $callId (and reverse mapping)")
+                FirebaseCrashlytics.getInstance().log("Created callId for $normalized")
             }
 
             // read tenant and attach if present
             val tenant = try {
                 prefs.getString("tenantId", null)
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "Failed reading tenantId: ${e.localizedMessage}")
                 null
             }
 
@@ -66,12 +91,31 @@ class MyCallRedirectionService : CallRedirectionService() {
             }
 
             Log.d(TAG, "Starting CallService for outgoing_start with callId=$callId and tenant=$tenant")
-            ContextCompat.startForegroundService(this, intent)
+            try {
+                ContextCompat.startForegroundService(this, intent)
+                FirebaseCrashlytics.getInstance().log("Started CallService for outgoing_start")
+            } catch (e: Exception) {
+                // If starting the foreground service fails, record and continue — callers should still place the call.
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "startForegroundService failed in MyCallRedirectionService: ${e.localizedMessage}")
+            }
 
-            placeCallUnmodified()
+            // Always call placeCallUnmodified() (or cancelCall() on fatal error)
+            try {
+                placeCallUnmodified()
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "placeCallUnmodified threw: ${e.localizedMessage}")
+            }
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.e(TAG, "Error in onPlaceCall: ${e.localizedMessage}", e)
-            cancelCall()
+            try {
+                cancelCall()
+            } catch (ex: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(ex)
+                Log.w(TAG, "cancelCall threw after onPlaceCall failure: ${ex.localizedMessage}")
+            }
         }
     }
 
@@ -85,6 +129,7 @@ class MyCallRedirectionService : CallRedirectionService() {
     // CallId lifecycle helpers (active + recent semantics)
     // -----------------------
     private fun markCallActiveForPhone(ctx: android.content.Context, phoneDigitsOrRaw: String, callId: String) {
+        FirebaseCrashlytics.getInstance().log("markCallActiveForPhone for $phoneDigitsOrRaw -> $callId")
         try {
             val normalized = normalizeNumber(phoneDigitsOrRaw) ?: phoneDigitsOrRaw
             val prefs = ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
@@ -97,6 +142,7 @@ class MyCallRedirectionService : CallRedirectionService() {
                 .apply()
             Log.d(TAG, "Marked call active for $normalized -> $callId until ${now + ACTIVE_CALL_TTL_MS}")
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "markCallActiveForPhone failed: ${e.localizedMessage}")
         }
     }
@@ -122,6 +168,7 @@ class MyCallRedirectionService : CallRedirectionService() {
 
             return null
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "readActiveOrRecentCallId failed: ${e.localizedMessage}")
             return null
         }
@@ -140,6 +187,7 @@ class MyCallRedirectionService : CallRedirectionService() {
             Log.d(TAG, "ensureCallIdForPhone created and marked active: $normalized -> $newId")
             return newId
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "ensureCallIdForPhone failed: ${e.localizedMessage}")
         }
         return generateCallId()

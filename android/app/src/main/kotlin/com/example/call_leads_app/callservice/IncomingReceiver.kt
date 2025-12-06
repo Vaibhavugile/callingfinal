@@ -15,14 +15,25 @@ import androidx.work.Data
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import java.util.UUID
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 
+
+/**
+ * Robust IncomingReceiver:
+ *  - Attempts ContextCompat.startForegroundService() normally.
+ *  - If the OS refuses (IllegalStateException / SecurityException / other Exceptions),
+ *    enqueues EnqueueEventWorker with the same payload so UploadWorker will handle sending later.
+ *  - Posts a lightweight tap notification for the user in fallback cases so they can open the app.
+ *
+ * This reduces ForegroundServiceDidNotStartInTimeException on strict OEMs while preserving functionality.
+ */
 class IncomingReceiver : BroadcastReceiver() {
 
     private val TAG = "IncomingReceiver"
     private val PREFS = "call_leads_prefs"
     private val KEY_LAST_OUTGOING = "last_outgoing_number"
     private val KEY_LAST_OUTGOING_TS = "last_outgoing_ts"
-    private val OUTGOING_MARKER_WINDOW_MS = 10_000L // 10 seconds
+    private val OUTGOING_MARKER_WINDOW_MS = 12_000L // slightly larger window
 
     // Active/recency semantics (keep in sync with CallService)
     private val REUSE_WINDOW_MS = 120_000L            // 2 minutes fallback
@@ -32,6 +43,7 @@ class IncomingReceiver : BroadcastReceiver() {
     private val NOTIF_ID_LEAD = 2401
 
     override fun onReceive(context: Context, intent: Intent) {
+        FirebaseCrashlytics.getInstance().log("IncomingReceiver.onReceive triggered")
         try {
             val tmState = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
             var incomingNumber: String? = null
@@ -39,6 +51,7 @@ class IncomingReceiver : BroadcastReceiver() {
                 incomingNumber = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
             }
 
+            FirebaseCrashlytics.getInstance().log("IncomingReceiver: state=$tmState incoming=$incomingNumber")
             Log.d(TAG, "📞 Triggered by Phone State Change - state=$tmState incoming=$incomingNumber")
 
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -54,28 +67,25 @@ class IncomingReceiver : BroadcastReceiver() {
             val tenantId = try {
                 prefs.getString("tenantId", null)
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 null
             }
 
+            // If we recently marked an outgoing call, treat the next OFFHOOK/RINGING as outbound
             if (isRecentOutgoing && normalizedIncoming != null) {
                 if (numbersLikelyMatch(lastOutgoing, normalizedIncoming)) {
+                    FirebaseCrashlytics.getInstance().log("Detected recent outgoing marker for $normalizedIncoming - treating as outbound")
                     Log.d(TAG, "ℹ️ Detected recent outgoing marker for $normalizedIncoming — treating as outbound and clearing marker.")
                     prefs.edit().remove(KEY_LAST_OUTGOING).remove(KEY_LAST_OUTGOING_TS).apply()
 
-                    // Try to reuse existing callId if present (active-or-recent), otherwise create & persist (active)
                     val existingCallId = readActiveOrRecentCallId(context, normalizedIncoming)
                     val callId = existingCallId ?: ensureCallIdForPhone(context, normalizedIncoming)
-                    if (existingCallId != null) {
-                        Log.d(TAG, "Reusing existing callId for $normalizedIncoming -> $existingCallId (recent outgoing)")
-                    }
-
                     val outIntent = Intent(context, CallService::class.java).apply {
                         putExtra("event", "outgoing_start")
                         putExtra("direction", "outbound")
                         putExtra("phoneNumber", normalizedIncoming)
                         putExtra("callId", callId)
                         putExtra("receivedAt", now)
-                        // attach tenant if present
                         tenantId?.let { putExtra("tenantId", it) }
                     }
                     safeStartServiceOrEnqueue(context, outIntent, normalizedIncoming)
@@ -85,9 +95,9 @@ class IncomingReceiver : BroadcastReceiver() {
 
             when (tmState) {
                 TelephonyManager.EXTRA_STATE_RINGING -> {
+                    FirebaseCrashlytics.getInstance().log("IncomingReceiver: RINGING for $normalizedIncoming")
                     Log.d(TAG, "RINGING — new incoming call: $incomingNumber")
                     if (!normalizedIncoming.isNullOrEmpty()) {
-                        // reuse existing active/recent callId if present
                         val existing = readActiveOrRecentCallId(context, normalizedIncoming)
                         val callId = existing ?: ensureCallIdForPhone(context, normalizedIncoming)
                         if (existing != null) Log.d(TAG, "Reusing existing callId for RINGING: $normalizedIncoming -> $existing")
@@ -106,23 +116,23 @@ class IncomingReceiver : BroadcastReceiver() {
                     }
                 }
                 TelephonyManager.EXTRA_STATE_OFFHOOK -> {
+                    FirebaseCrashlytics.getInstance().log("IncomingReceiver: OFFHOOK for $normalizedIncoming")
                     Log.d(TAG, "OFFHOOK — call answered or started: $incomingNumber")
-                    // prefer active/recent mapping; if none, create & mark active for normalizedIncoming or raw incomingNumber
+
                     val callId = normalizedIncoming?.let { readActiveOrRecentCallId(context, it) } ?: run {
                         val cid = ensureCallIdForPhone(context, normalizedIncoming ?: incomingNumber)
                         cid ?: generateCallId()
                     }
 
-                    // persist reverse mapping in case it wasn't present
                     try {
                         val markerPhone = normalizedIncoming ?: incomingNumber
                         if (!markerPhone.isNullOrEmpty() && !callId.isNullOrEmpty()) {
-                            // ensure reverse mapping exists
                             val prefsLocal = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                             prefsLocal.edit().putString("callid_to_phone_$callId", markerPhone).apply()
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "Failed to persist reverse mapping for OFFHOOK: ${e.localizedMessage}")
+                        FirebaseCrashlytics.getInstance().recordException(e)
+                        Log.w(TAG, "Failed to persist reverse mapping for OFFHOOK: ${e.message}")
                     }
 
                     val i = Intent(context, CallService::class.java).apply {
@@ -136,6 +146,7 @@ class IncomingReceiver : BroadcastReceiver() {
                     safeStartServiceOrEnqueue(context, i, normalizedIncoming)
                 }
                 TelephonyManager.EXTRA_STATE_IDLE -> {
+                    FirebaseCrashlytics.getInstance().log("IncomingReceiver: IDLE for $normalizedIncoming")
                     Log.d(TAG, "IDLE — finalizing call for $incomingNumber")
                     val callId = normalizedIncoming?.let { readActiveOrRecentCallId(context, it) } ?: ensureCallIdForPhone(context, normalizedIncoming ?: incomingNumber)
                     try {
@@ -145,7 +156,8 @@ class IncomingReceiver : BroadcastReceiver() {
                             prefsLocal.edit().putString("callid_to_phone_$callId", markerPhone).apply()
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "Failed to persist reverse mapping for IDLE: ${e.localizedMessage}")
+                        FirebaseCrashlytics.getInstance().recordException(e)
+                        Log.w(TAG, "Failed to persist reverse mapping for IDLE: ${e.message}")
                     }
 
                     val i = Intent(context, CallService::class.java).apply {
@@ -163,52 +175,91 @@ class IncomingReceiver : BroadcastReceiver() {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error in onReceive: ${e.localizedMessage}", e)
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.e(TAG, "Error in onReceive: ${e.message}", e)
         }
     }
 
-    private fun safeStartServiceOrEnqueue(context: Context, svcIntent: Intent, normalizedPhone: String?) {
+    /**
+     * Try to start the CallService as a foreground service.
+     * If that fails (some OEMs throw various exceptions), fallback to scheduling EnqueueEventWorker with the same payload.
+     */
+    private fun safeStartServiceOrEnqueue(ctx: Context, svcIntent: Intent, normalizedPhone: String?) {
+        // Ensure receivedAt present so enqueue path has timestamp
+        if (!svcIntent.hasExtra("receivedAt")) svcIntent.putExtra("receivedAt", System.currentTimeMillis())
+
         try {
-            ContextCompat.startForegroundService(context, svcIntent)
-        } catch (ex: Exception) {
-            // Foreground start not allowed in this context on some devices / OEMs.
-            Log.w(TAG, "startForegroundService failed (${ex.javaClass.simpleName}) — enqueueing WorkManager job and posting notification.")
-            // enqueue a lightweight worker that will persist the event
+            Log.d(TAG, "Attempting to start CallService (foreground) with extras=${svcIntent.extras?.keySet()}")
+            ContextCompat.startForegroundService(ctx, svcIntent)
+            Log.d(TAG, "ContextCompat.startForegroundService succeeded")
+            return
+        } catch (e: IllegalStateException) {
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "IllegalStateException while starting foreground service: ${e.message}")
+        } catch (e: SecurityException) {
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "SecurityException starting service: ${e.message}")
+        } catch (e: Exception) {
+            // Catch-all for any other exception types that OEMs might throw/wrap
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "General exception starting service: ${e.message}")
+        }
+
+        // START: fallback path -> persist via WorkManager (so UploadWorker picks up later)
+        FirebaseCrashlytics.getInstance().log("safeStartServiceOrEnqueue: startForegroundService failed, enqueueing worker")
+        try {
+            // Build Data safely from extras
             val dataBuilder = Data.Builder()
             svcIntent.extras?.keySet()?.forEach { key ->
-                val v = svcIntent.extras?.get(key)
-                when (v) {
-                    is String -> dataBuilder.putString(key, v)
-                    is Long -> dataBuilder.putLong(key, v)
-                    is Int -> dataBuilder.putInt(key, v)
-                    is Double -> dataBuilder.putDouble(key, v)
-                    is Boolean -> dataBuilder.putBoolean(key, v)
-                    else -> v?.toString()?.let { dataBuilder.putString(key, it) }
+                try {
+                    val v = svcIntent.extras?.get(key) ?: return@forEach
+                    when (v) {
+                        is String -> dataBuilder.putString(key, v)
+                        is Int -> dataBuilder.putInt(key, v)
+                        is Long -> dataBuilder.putLong(key, v)
+                        is Boolean -> dataBuilder.putBoolean(key, v)
+                        is Double -> dataBuilder.putDouble(key, v)
+                        is Float -> dataBuilder.putFloat(key, v)
+                        else -> {
+                            // best-effort fallback
+                            dataBuilder.putString(key, v.toString())
+                        }
+                    }
+                } catch (ex: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(ex)
                 }
             }
-            // defensive: if tenantId present in prefs but somehow not in extras, add it
+
+            // Defensive: ensure tenantId present if available in prefs
             try {
-                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val tenant = prefs.getString("tenantId", null)
                 if (!tenant.isNullOrEmpty() && !dataBuilder.build().keyValueMap.containsKey("tenantId")) {
                     dataBuilder.putString("tenantId", tenant)
-                    Log.d(TAG, "Added tenantId to Worker input: $tenant")
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Error while adding tenantId to worker input: ${e.localizedMessage}")
+            } catch (ex: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(ex)
             }
 
-            if (!svcIntent.hasExtra("receivedAt")) {
+            // Ensure receivedAt
+            if (!dataBuilder.build().keyValueMap.containsKey("receivedAt")) {
                 dataBuilder.putLong("receivedAt", System.currentTimeMillis())
             }
 
+            val inputData = dataBuilder.build()
             val work = OneTimeWorkRequestBuilder<EnqueueEventWorker>()
-                .setInputData(dataBuilder.build())
+                .setInputData(inputData)
                 .build()
-            WorkManager.getInstance(context).enqueue(work)
 
-            // post a notification so user can tap to open the app (and we will pass lead id when available)
-            postTapNotification(context, normalizedPhone)
+            WorkManager.getInstance(ctx).enqueue(work)
+            FirebaseCrashlytics.getInstance().log("Enqueued EnqueueEventWorker for $normalizedPhone")
+            Log.w(TAG, "Fallback: Enqueued EnqueueEventWorker (service start failed). Input keys=${inputData.keyValueMap.keys}")
+
+            // Post a small tap notification so user can open the app and inspect the lead (useful when service path failed)
+            postTapNotification(ctx, normalizedPhone)
+        } catch (ex: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(ex)
+            Log.e(TAG, "Failed to enqueue fallback work: ${ex.message}", ex)
         }
     }
 
@@ -217,16 +268,24 @@ class IncomingReceiver : BroadcastReceiver() {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val ch = NotificationChannel(NOTIF_CHANNEL_ID, "Call leads", NotificationManager.IMPORTANCE_HIGH)
+                ch.setShowBadge(false)
                 nm.createNotificationChannel(ch)
             }
 
             val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
             launch?.putExtra("open_lead_phone", phone)
-            val pending = PendingIntent.getActivity(context, 0, launch, PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+
+            val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+
+            val pending = PendingIntent.getActivity(context, phone?.hashCode() ?: 0, launch, pendingFlags)
 
             val notif = NotificationCompat.Builder(context, NOTIF_CHANNEL_ID)
                 .setContentTitle("Call detected")
-                .setContentText("Tap to open lead for $phone")
+                .setContentText(if (!phone.isNullOrEmpty()) "Tap to open lead for $phone" else "Tap to open lead")
                 .setSmallIcon(android.R.drawable.sym_call_incoming)
                 .setContentIntent(pending)
                 .setAutoCancel(true)
@@ -234,11 +293,12 @@ class IncomingReceiver : BroadcastReceiver() {
 
             nm.notify(NOTIF_ID_LEAD, notif)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to post notification: ${e.localizedMessage}", e)
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.e(TAG, "Failed to post notification: ${e.message}", e)
         }
     }
 
-    // tiny helpers
+    // Helpers
     private fun normalizeNumber(n: String?): String? {
         if (n == null) return null
         val digits = n.filter { it.isDigit() }
@@ -259,9 +319,6 @@ class IncomingReceiver : BroadcastReceiver() {
         return "call_" + UUID.randomUUID().toString().replace("-", "").take(12)
     }
 
-    // -----------------------
-    // CallId lifecycle helpers (active + recent semantics)
-    // -----------------------
     private fun markCallActiveForPhone(ctx: Context, phoneDigitsOrRaw: String, callId: String) {
         try {
             val normalized = normalizeNumber(phoneDigitsOrRaw) ?: phoneDigitsOrRaw
@@ -275,7 +332,8 @@ class IncomingReceiver : BroadcastReceiver() {
                 .apply()
             Log.d(TAG, "Marked call active for $normalized -> $callId until ${now + ACTIVE_CALL_TTL_MS}")
         } catch (e: Exception) {
-            Log.w(TAG, "markCallActiveForPhone failed: ${e.localizedMessage}")
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "markCallActiveForPhone failed: ${e.message}")
         }
     }
 
@@ -300,7 +358,8 @@ class IncomingReceiver : BroadcastReceiver() {
 
             return null
         } catch (e: Exception) {
-            Log.w(TAG, "readActiveOrRecentCallId failed: ${e.localizedMessage}")
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "readActiveOrRecentCallId failed: ${e.message}")
             return null
         }
     }
@@ -316,17 +375,11 @@ class IncomingReceiver : BroadcastReceiver() {
                 .apply()
             Log.d(TAG, "Cleared callId mapping for $normalized")
         } catch (e: Exception) {
-            Log.w(TAG, "clearCallIdMapping failed: ${e.localizedMessage}")
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "clearCallIdMapping failed: ${e.message}")
         }
     }
 
-    /**
-     * Backward-compatible ensure: returns existing mapping if present, otherwise creates a new callId
-     * and marks it active.
-     *
-     * NOTE: This function now accepts a Context so it can call markCallActiveForPhone(ctx, ...)
-     * and properly persist activity metadata.
-     */
     private fun ensureCallIdForPhone(ctx: Context, phoneDigitsOrRaw: String?): String? {
         try {
             val normalized = normalizeNumber(phoneDigitsOrRaw) ?: phoneDigitsOrRaw
@@ -334,39 +387,19 @@ class IncomingReceiver : BroadcastReceiver() {
             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val existing = prefs.getString("callid_$normalized", null)
             if (!existing.isNullOrEmpty()) {
-                // backfill timestamp if missing
                 val ts = prefs.getLong("callid_ts_$normalized", 0L)
                 if (ts == 0L) prefs.edit().putLong("callid_ts_$normalized", System.currentTimeMillis()).apply()
                 return existing
             }
 
             val newId = generateCallId()
-            // prefer to mark active using the Context-aware helper
-            try {
-                markCallActiveForPhone(ctx, normalized, newId)
-            } catch (e: Exception) {
-                Log.w(TAG, "markCallActiveForPhone invocation failed: ${e.localizedMessage}")
-                // fallback: write directly
-                try {
-                    prefs.edit()
-                        .putString("callid_$normalized", newId)
-                        .putLong("callid_ts_$normalized", System.currentTimeMillis())
-                        .putLong("callid_active_until_$normalized", System.currentTimeMillis() + ACTIVE_CALL_TTL_MS)
-                        .putString("callid_to_phone_$newId", normalized)
-                        .apply()
-                } catch (ex: Exception) {
-                    Log.w(TAG, "Fallback persist of callId marker failed: ${ex.localizedMessage}")
-                }
-            }
-
+            markCallActiveForPhone(ctx, normalized, newId)
             Log.d(TAG, "Saved callId marker for $normalized -> $newId (ensureCallIdForPhone)")
             return newId
         } catch (e: Exception) {
-            Log.w(TAG, "ensureCallIdForPhone failed: ${e.localizedMessage}")
+            FirebaseCrashlytics.getInstance().recordException(e)
+            Log.w(TAG, "ensureCallIdForPhone failed: ${e.message}")
         }
         return null
     }
-
-    // NOTE: Because SharedPreferences doesn't expose its Context, callers of ensureCallIdForPhone
-    // must pass the Android Context (as this file now does). This keeps the logic safe and testable.
 }

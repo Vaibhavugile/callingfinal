@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlin.random.Random
 import com.google.firebase.firestore.Query
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 
 /**
  * UploadWorker: reads queued events from EventQueue, and writes them into Firestore using the
@@ -47,13 +48,18 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
     private val ACTIVE_CALL_TTL_MS = 60 * 60 * 1000L // 1 hour active TTL
 
     override suspend fun doWork(): Result {
+        FirebaseCrashlytics.getInstance().log("UploadWorker.doWork start")
         try {
             // Garbage-collect stale head entries so they don't block the queue indefinitely.
             // Remove contiguous head items older than 60s (configurable here).
             try {
                 val removed = queue.removeOldEntriesOlderThan(60_000L)
-                if (removed > 0) Log.w(TAG, "Removed $removed stale head items before processing to avoid blocking.")
+                if (removed > 0) {
+                    Log.w(TAG, "Removed $removed stale head items before processing to avoid blocking.")
+                    FirebaseCrashlytics.getInstance().log("Removed $removed stale head items")
+                }
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.w(TAG, "removeOldEntriesOlderThan failed: ${e.localizedMessage}")
             }
 
@@ -62,7 +68,9 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                 try {
                     FirebaseApp.initializeApp(applicationContext)
                     Log.d(TAG, "FirebaseApp initialized.")
+                    FirebaseCrashlytics.getInstance().log("FirebaseApp initialized")
                 } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.e(TAG, "Failed to initialize FirebaseApp: ${e.localizedMessage}", e)
                     return Result.failure()
                 }
@@ -74,24 +82,36 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                 if (auth.currentUser == null) {
                     auth.signInAnonymously().await()
                     Log.d(TAG, "Signed in anonymously to Firebase.")
+                    FirebaseCrashlytics.getInstance().log("Signed in to Firebase anonymously")
                 }
             } catch (e: FirebaseAuthException) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.w(TAG, "FirebaseAuthException during anonymous sign-in: ${e.localizedMessage}")
                 return Result.retry()
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.e(TAG, "Auth error: ${e.localizedMessage}", e)
                 return Result.retry()
             }
 
             val firestore = FirebaseFirestore.getInstance()
 
-            val items = queue.peekAll()
+            val items = try {
+                queue.peekAll()
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "Failed to peek EventQueue: ${e.localizedMessage}")
+                emptyList<Map<String, Any?>>()
+            }
+
             if (items.isEmpty()) {
                 Log.d(TAG, "No queued events to upload.")
+                FirebaseCrashlytics.getInstance().log("No queued events to upload")
                 return Result.success()
             }
 
             Log.d(TAG, "Preparing to upload ${items.size} queued events.")
+            FirebaseCrashlytics.getInstance().log("Preparing to upload ${items.size} queued events")
 
             // Prepare UpsertOps only for items with usable phone numbers.
             data class IndexedOp(
@@ -119,6 +139,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                             if (!recovered.isNullOrEmpty()) {
                                 phoneRaw = recovered
                                 Log.d(TAG, "Recovered phone for queued item idx=$idx via callId=$callId -> $recovered")
+                                FirebaseCrashlytics.getInstance().log("Recovered phone for queued item idx=$idx via callId")
                             }
                         }
                     }
@@ -127,6 +148,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                     if (phone.isEmpty()) {
                         // Skip items without usable phone, but keep them in queue for later investigation/recovery.
                         Log.w(TAG, "Skipping queued item with empty phone: $item")
+                        FirebaseCrashlytics.getInstance().log("Skipping queued item with empty phone at idx=$idx")
                         continue
                     }
 
@@ -149,6 +171,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                             // route to admin review tenant so data isn't lost
                             tenant = "default_tenant"
                             Log.w(TAG, "Item idx=$idx missing tenantId; routing to default_tenant for review.")
+                            FirebaseCrashlytics.getInstance().log("Item idx=$idx missing tenantId; routed to default_tenant")
                         } else {
                             // Last-chance attempt: try to recover tenant from local prefs (best-effort)
                             try {
@@ -163,6 +186,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                                 }
                             } catch (e: Exception) {
                                 tenant = "default_tenant"
+                                FirebaseCrashlytics.getInstance().recordException(e)
                                 Log.w(TAG, "Error reading tenant from prefs; using default_tenant for idx=$idx: ${e.localizedMessage}")
                             }
                         }
@@ -183,6 +207,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                         try {
                             markCallActiveForPhone(applicationContext, phone, callId)
                         } catch (e: Exception) {
+                            FirebaseCrashlytics.getInstance().recordException(e)
                             Log.w(TAG, "Failed to persist reverse mapping for generated callId: ${e.localizedMessage}")
                         }
                     }
@@ -243,12 +268,14 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                         )
                     )
                 } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.w(TAG, "Skipping malformed queued item at index $idx: $item", e)
                 }
             }
 
             if (ops.isEmpty()) {
                 Log.w(TAG, "No valid ops to upload after parsing queued items.")
+                FirebaseCrashlytics.getInstance().log("No valid ops to upload after parsing queued items")
                 // Nothing to upload: return success so worker won't retry repeatedly
                 return Result.success()
             }
@@ -273,6 +300,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                         batch.set(eventRef, op.eventData)
                         op.finalizeFields?.let { batch.set(callRef, it, SetOptions.merge()) }
                     } catch (e: Exception) {
+                        FirebaseCrashlytics.getInstance().recordException(e)
                         Log.w(TAG, "Error preparing op for batch (opIdx=${op.originalIndex}): ${e.localizedMessage}", e)
                     }
                 }
@@ -282,10 +310,13 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                     // mark the original indices in this chunk as uploaded
                     for (op in chunk) uploadedOriginalIndices.add(op.originalIndex)
                     Log.d(TAG, "Committed chunk of ${chunk.size} ops to Firestore. Uploaded indices: ${chunk.map { it.originalIndex }}")
+                    FirebaseCrashlytics.getInstance().log("Committed chunk of ${chunk.size} ops to Firestore")
                 } catch (e: FirebaseException) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.w(TAG, "Firestore commit FirebaseException (transient?) : ${e.localizedMessage}", e)
                     return Result.retry()
                 } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.e(TAG, "Firestore commit failed: ${e.localizedMessage}", e)
                     return Result.retry()
                 }
@@ -308,16 +339,20 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                 try {
                     queue.removeFirstN(removeCount)
                     Log.d(TAG, "Removed $removeCount items from EventQueue after successful upload.")
+                    FirebaseCrashlytics.getInstance().log("Removed $removeCount items from EventQueue after upload")
                 } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.w(TAG, "Failed to remove $removeCount items from queue after upload: ${e.localizedMessage}", e)
                     // don't fail the job — we've uploaded them
                 }
             } else {
                 Log.w(TAG, "No contiguous prefix of queued items was uploaded; leaving queue intact for later retry.")
+                FirebaseCrashlytics.getInstance().log("No contiguous prefix uploaded; leaving queue intact")
             }
 
             return Result.success()
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.e(TAG, "Unexpected error in UploadWorker: ${e.localizedMessage}", e)
             return Result.retry()
         }
@@ -341,7 +376,9 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
 
                 WorkManager.getInstance(context).enqueue(request)
                 Log.d("UploadWorker", "Enqueued UploadWorker (one-time).")
+                FirebaseCrashlytics.getInstance().log("Enqueued UploadWorker (one-time)")
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.e("UploadWorker", "Failed to enqueue UploadWorker: ${e.localizedMessage}", e)
             }
         }
@@ -408,16 +445,19 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                     val finalOutcome = doc.get("finalOutcome")
                     if (finalizedAt == null && finalOutcome == null) {
                         Log.d(TAG, "Reusing open call doc ${doc.id} for phone=$phone under tenant=$tenant")
+                        FirebaseCrashlytics.getInstance().log("Reusing open call doc ${doc.id} for phone")
                         return doc.id
                     }
                 }
             }
         } catch (e: Exception) {
             // Query could fail on missing index or network; fallback to generate
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "Open-call lookup failed for tenant=$tenant lead=$leadId phone=$phone : ${e.localizedMessage}")
         }
         val gen = generateCallId(ts)
         Log.d(TAG, "No open call found; generated callId=$gen for phone=$phone under tenant=$tenant")
+        FirebaseCrashlytics.getInstance().log("Generated callId=$gen for phone")
         return gen
     }
 
@@ -429,6 +469,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
      * that are still active (callid_active_until > now) or very recent (callid_ts within REUSE_WINDOW_MS).
      */
     private fun tryRecoverPhoneForCallId(ctx: Context, callId: String): String? {
+        FirebaseCrashlytics.getInstance().log("tryRecoverPhoneForCallId lookup callId=$callId")
         try {
             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             // direct reverse mapping
@@ -448,15 +489,18 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                 val normalized = k.removePrefix("callid_")
                 val activeUntil = prefs.getLong("callid_active_until_$normalized", 0L)
                 if (activeUntil > now) {
+                    FirebaseCrashlytics.getInstance().log("tryRecoverPhoneForCallId found active mapping for $normalized")
                     return normalized
                 }
                 val ts = prefs.getLong("callid_ts_$normalized", 0L)
                 if (ts != 0L && (now - ts) <= REUSE_WINDOW_MS) {
+                    FirebaseCrashlytics.getInstance().log("tryRecoverPhoneForCallId found recent mapping for $normalized")
                     return normalized
                 }
                 // else too old, continue scanning
             }
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "tryRecoverPhoneForCallId failed: ${e.localizedMessage}")
         }
         return null
@@ -479,7 +523,9 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                 .putString("callid_to_phone_$callId", normalized)
                 .apply()
             Log.d(TAG, "Worker-marked call active: $normalized -> $callId")
+            FirebaseCrashlytics.getInstance().log("Worker-marked call active for $normalized")
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "markCallActiveForPhone failed in worker: ${e.localizedMessage}")
         }
     }

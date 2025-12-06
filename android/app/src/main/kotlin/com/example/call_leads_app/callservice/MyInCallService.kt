@@ -6,6 +6,7 @@ import android.telecom.Call
 import android.telecom.InCallService
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 import java.util.UUID
 
 class MyInCallService : InCallService() {
@@ -20,21 +21,25 @@ class MyInCallService : InCallService() {
     private val callCallback = object : Call.Callback() {
         override fun onStateChanged(call: Call, state: Int) {
             super.onStateChanged(call, state)
+            FirebaseCrashlytics.getInstance().log("MyInCallService.onStateChanged state=$state")
             Log.d(TAG, "onStateChanged: state=$state handle=${call.details?.handle}")
         }
 
         override fun onDetailsChanged(call: Call, details: Call.Details?) {
             super.onDetailsChanged(call, details)
+            FirebaseCrashlytics.getInstance().log("MyInCallService.onDetailsChanged")
             Log.d(TAG, "onDetailsChanged: ${call.details?.handle}")
         }
     }
 
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
+        FirebaseCrashlytics.getInstance().log("MyInCallService.onCallAdded")
         Log.d(TAG, "onCallAdded: ${call.details?.handle}")
         try {
             call.registerCallback(callCallback)
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.e(TAG, "Error registering call callback: ${e.localizedMessage}", e)
         }
 
@@ -45,19 +50,35 @@ class MyInCallService : InCallService() {
             val normalized = normalizeNumber(phone) ?: phone
 
             // Try to reuse existing mapping (active/recent), otherwise create one and mark active
-            val existing = normalized?.let { readActiveOrRecentCallId(applicationContext, it) }
-            val callId = existing ?: ensureCallIdForPhone(applicationContext, normalized ?: phone)
+            val existing = try {
+                normalized?.let { readActiveOrRecentCallId(applicationContext, it) }
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "readActiveOrRecentCallId failed in onCallAdded: ${e.localizedMessage}")
+                null
+            }
+
+            val callId = try {
+                existing ?: ensureCallIdForPhone(applicationContext, normalized ?: phone)
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "ensureCallIdForPhone failed in onCallAdded: ${e.localizedMessage}")
+                generateCallId()
+            }
 
             if (existing != null) {
                 Log.d(TAG, "Reusing existing callId marker from InCallService for ${normalized ?: phone} -> $existing")
+                FirebaseCrashlytics.getInstance().log("Reused callId from InCallService")
             } else {
                 Log.d(TAG, "Persisted callId marker from InCallService for ${normalized ?: phone} -> $callId")
+                FirebaseCrashlytics.getInstance().log("Persisted callId marker from InCallService")
             }
 
             // read tenantId from prefs (if present) and attach to intent
             val tenant = try {
                 applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("tenantId", null)
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.w(TAG, "Failed reading tenantId from prefs: ${e.localizedMessage}")
                 null
             }
@@ -73,17 +94,21 @@ class MyInCallService : InCallService() {
             // try start service (defensive - may fail in some contexts)
             try {
                 ContextCompat.startForegroundService(applicationContext, intent)
+                FirebaseCrashlytics.getInstance().log("Started CallService from InCallService (ringing)")
             } catch (ex: Exception) {
                 // ignore; On many OEMs InCallService may run in a context that can't start foreground services.
+                FirebaseCrashlytics.getInstance().recordException(ex)
                 Log.w(TAG, "Couldn't start CallService from InCallService: ${ex.localizedMessage}")
             }
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "Failed to forward callAdded to CallService: ${e.localizedMessage}")
         }
     }
 
     override fun onCallRemoved(call: Call) {
         super.onCallRemoved(call)
+        FirebaseCrashlytics.getInstance().log("MyInCallService.onCallRemoved")
         Log.d(TAG, "onCallRemoved: ${call.details?.handle}")
         try {
             call.unregisterCallback(callCallback)
@@ -97,13 +122,28 @@ class MyInCallService : InCallService() {
             val phone = handle?.schemeSpecificPart
             val normalized = normalizeNumber(phone) ?: phone
 
-            val existing = if (!normalized.isNullOrEmpty()) readActiveOrRecentCallId(applicationContext, normalized) else null
-            val callId = existing ?: ensureCallIdForPhone(applicationContext, normalized ?: phone)
+            val existing = try {
+                if (!normalized.isNullOrEmpty()) readActiveOrRecentCallId(applicationContext, normalized) else null
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "readActiveOrRecentCallId failed in onCallRemoved: ${e.localizedMessage}")
+                null
+            }
+
+            val callId = try {
+                existing ?: ensureCallIdForPhone(applicationContext, normalized ?: phone)
+            } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
+                Log.w(TAG, "ensureCallIdForPhone failed in onCallRemoved: ${e.localizedMessage}")
+                generateCallId()
+            }
 
             if (existing != null) {
                 Log.d(TAG, "Reusing existing callId marker on callRemoved for ${normalized ?: phone} -> $existing")
+                FirebaseCrashlytics.getInstance().log("Reused callId on callRemoved")
             } else {
                 Log.d(TAG, "Created callId marker on callRemoved for ${normalized ?: phone} -> $callId")
+                FirebaseCrashlytics.getInstance().log("Created callId marker on callRemoved")
             }
 
             // ensure reverse mapping exists for callId (markCallActiveForPhone already does this when creating)
@@ -112,6 +152,7 @@ class MyInCallService : InCallService() {
                     val prefs = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     prefs.edit().putString("callid_to_phone_$callId", normalized).apply()
                 } catch (e: Exception) {
+                    FirebaseCrashlytics.getInstance().recordException(e)
                     Log.w(TAG, "Failed to ensure reverse mapping on callRemoved: ${e.localizedMessage}")
                 }
             }
@@ -120,6 +161,7 @@ class MyInCallService : InCallService() {
             val tenant = try {
                 applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("tenantId", null)
             } catch (e: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(e)
                 Log.w(TAG, "Failed reading tenantId from prefs: ${e.localizedMessage}")
                 null
             }
@@ -134,10 +176,13 @@ class MyInCallService : InCallService() {
             }
             try {
                 ContextCompat.startForegroundService(applicationContext, intent)
+                FirebaseCrashlytics.getInstance().log("Started CallService from InCallService (ended)")
             } catch (ex: Exception) {
+                FirebaseCrashlytics.getInstance().recordException(ex)
                 Log.w(TAG, "Couldn't start CallService for ended event: ${ex.localizedMessage}")
             }
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "Failed to forward callRemoved to CallService: ${e.localizedMessage}")
         }
     }
@@ -156,6 +201,7 @@ class MyInCallService : InCallService() {
     // CallId lifecycle helpers (active & recent semantics)
     // -----------------------
     private fun markCallActiveForPhone(ctx: Context, phoneDigitsOrRaw: String, callId: String) {
+        FirebaseCrashlytics.getInstance().log("MyInCallService.markCallActiveForPhone for $phoneDigitsOrRaw -> $callId")
         try {
             val normalized = normalizeNumber(phoneDigitsOrRaw) ?: phoneDigitsOrRaw
             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -168,6 +214,7 @@ class MyInCallService : InCallService() {
                 .apply()
             Log.d(TAG, "Marked call active for $normalized -> $callId until ${now + ACTIVE_CALL_TTL_MS}")
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "markCallActiveForPhone failed: ${e.localizedMessage}")
         }
     }
@@ -193,6 +240,7 @@ class MyInCallService : InCallService() {
 
             return null
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "readActiveOrRecentCallId failed: ${e.localizedMessage}")
             return null
         }
@@ -211,6 +259,7 @@ class MyInCallService : InCallService() {
             Log.d(TAG, "ensureCallIdForPhone created and marked active: $normalized -> $newId")
             return newId
         } catch (e: Exception) {
+            FirebaseCrashlytics.getInstance().recordException(e)
             Log.w(TAG, "ensureCallIdForPhone failed: ${e.localizedMessage}")
         }
         return generateCallId()

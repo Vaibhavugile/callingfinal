@@ -13,6 +13,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 
 class MainActivity : FlutterActivity() {
 
@@ -22,11 +23,25 @@ class MainActivity : FlutterActivity() {
     private val TAG = "MainActivity"
     private val REQUEST_ROLE_DIALER = 32123
 
-    // MethodChannel used to forward "openLeadByPhone" calls into Flutter
     private var openLeadMethodChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        try {
+            val crashlytics = FirebaseCrashlytics.getInstance()
+            crashlytics.setCustomKey("device_model", Build.MODEL ?: "unknown")
+            crashlytics.setCustomKey("os_version", Build.VERSION.RELEASE ?: "unknown")
+
+            // 🔥 TEST CRASHLYTICS EVENT (Non-fatal)
+            // This will appear in Firebase → Crashlytics → Non-fatal
+            FirebaseCrashlytics.getInstance().recordException(
+                Exception("TEST_NON_FATAL_CRASH_FROM_MAINACTIVITY")
+            )
+
+        } catch (e: Exception) {
+            Log.w(TAG, "Crashlytics init failed: ${e.localizedMessage}")
+        }
 
         // -------------------
         // EVENT CHANNEL SETUP
@@ -40,10 +55,7 @@ class MainActivity : FlutterActivity() {
                 try {
                     Log.d(TAG, "Flutter EventChannel LISTEN attached.")
 
-                    // Attach event sink to CallService
                     com.example.call_leads_app.callservice.CallService.eventSink = events
-
-                    // Flush pending native events (those buffered while Flutter was detached)
                     com.example.call_leads_app.callservice.CallService.flushPendingToSink()
 
                 } catch (e: Exception) {
@@ -62,7 +74,7 @@ class MainActivity : FlutterActivity() {
         })
 
         // -------------------
-        // METHOD CHANNEL SETUP (existing native channel)
+        // METHOD CHANNEL SETUP
         // -------------------
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -76,7 +88,6 @@ class MainActivity : FlutterActivity() {
                     result.success(ok)
                 }
 
-                // NEW! Flutter can call this to flush pending events.
                 "flushPendingEvents" -> {
                     try {
                         Log.d(TAG, "Manual flushPendingEvents() called from Flutter")
@@ -88,7 +99,6 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
-                // NEW: allow Flutter to persist tenantId into native SharedPreferences
                 "setTenantId" -> {
                     try {
                         val tenantId = call.argument<String>("tenantId")
@@ -107,7 +117,6 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
-                // NEW: clear tenantId from native prefs
                 "clearTenantId" -> {
                     try {
                         val prefs = getSharedPreferences("call_leads_prefs", Context.MODE_PRIVATE)
@@ -125,21 +134,15 @@ class MainActivity : FlutterActivity() {
         }
 
         // -------------------
-        // OPEN LEAD METHOD CHANNEL (native -> flutter one-off)
+        // OPEN LEAD METHOD CHANNEL
         // -------------------
         openLeadMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, OPEN_LEAD_CHANNEL)
 
-        // If the activity was launched with extras, forward them to Flutter
         handleIntentForOpenLead(intent)
     }
 
-    /**
-     * IMPORTANT: signature must be non-null Intent (this is the correct override).
-     * onNewIntent is called when the activity is relaunched with a new intent (e.g. tapping notification).
-     */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // update the activity intent reference
         setIntent(intent)
         handleIntentForOpenLead(intent)
     }
@@ -148,11 +151,10 @@ class MainActivity : FlutterActivity() {
         val phone = intent?.getStringExtra("open_lead_phone")
         if (!phone.isNullOrEmpty()) {
             Log.d(TAG, "handleIntentForOpenLead: forwarding open_lead_phone=$phone to Flutter")
-            // Try immediate invoke; if engine not ready, retry shortly.
             try {
                 openLeadMethodChannel?.invokeMethod("openLeadByPhone", mapOf("phone" to phone))
             } catch (e: Exception) {
-                Log.w(TAG, "invokeMethod failed (engine might be warming). Scheduling retry: ${e.localizedMessage}")
+                Log.w(TAG, "invokeMethod failed: ${e.localizedMessage}")
                 Handler(Looper.getMainLooper()).postDelayed({
                     try {
                         openLeadMethodChannel?.invokeMethod("openLeadByPhone", mapOf("phone" to phone))
@@ -164,9 +166,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // -------------------
-    // REQUEST ROLE DIALER
-    // -------------------
     private fun requestDialerRole(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             Log.w(TAG, "ROLE_DIALER requires API 29+. Skipped.")

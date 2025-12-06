@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 
 import '../services/lead_service.dart';
 import '../models/lead.dart';
@@ -34,7 +35,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     print("🏷 Loaded tenantId in HomeScreen: $_tenantId");
 
-    // Load leads (LeadService already isolates by deterministic ID + tenant)
+    // Load leads
     await _leadService.loadLeads();
     _leads = List<Lead>.from(_leadService.getAll());
 
@@ -129,6 +130,32 @@ class _HomeScreenState extends State<HomeScreen> {
                             _leads.where((e) => e.status == "Interested").length,
                             Colors.green),
                       ],
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // 🔥🔥🔥 CRASHLYTICS TEST BUTTON (ADDED HERE)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.all(16),
+                            backgroundColor: Colors.redAccent),
+                        onPressed: () {
+                          FirebaseCrashlytics.instance.recordError(
+                            Exception("TEST_CRASH_FROM_FLUTTER_BUTTON"),
+                            StackTrace.current,
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text("Crashlytics test event sent!")),
+                          );
+                        },
+                        child: const Text(
+                          "Send Crashlytics Test Event",
+                          style: TextStyle(fontSize: 16),
+                        ),
+                      ),
                     ),
 
                     const SizedBox(height: 20),
