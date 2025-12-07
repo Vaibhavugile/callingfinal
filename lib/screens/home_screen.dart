@@ -20,7 +20,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-/// Lightweight latest-call model (similar to LeadListScreen)
+/// Lightweight latest-call model (same idea as in LeadListScreen)
 class LatestCall {
   final String? callId;
   final String? phoneNumber;
@@ -189,10 +189,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final dur = latest.durationInSeconds ?? 0;
     final outcome = (latest.finalOutcome ?? '').toLowerCase();
 
-    // Only consider OUTGOING calls as "rejected"
+    // Only outgoing are considered rejected
     if (dir != 'outbound') return false;
 
-    // outbound + 0 sec  OR  outbound + finalOutcome == "rejected"
     if (dur == 0) return true;
     if (outcome == 'rejected') return true;
 
@@ -310,6 +309,15 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _openLeadListWithFilter(String filter) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LeadListScreen(initialFilter: filter),
+      ),
+    );
+  }
+
   /// Generic runner for call-log sync with nice progress UI
   Future<void> _runFixFromCallLog({
     required Future<void> Function() action,
@@ -371,6 +379,119 @@ class _HomeScreenState extends State<HomeScreen> {
     return _runFixFromCallLog(
       action: () => widget.callHandler.fixLast30DaysFromCallLog(),
       label: "last 30 days",
+    );
+  }
+
+  void _showFixOptionsSheet() {
+    if (_syncing) return;
+
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  "Fix data from Call Log",
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "Choose which calls you want to sync.",
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.all(14),
+                      backgroundColor: _accentTeal,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(Icons.today),
+                    label: const Text("Fix TODAY's calls"),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _runFixTodayFromCallLog();
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.all(14),
+                      backgroundColor: Colors.white,
+                      foregroundColor: _accentIndigo,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(
+                          color: _accentIndigo.withOpacity(0.4),
+                        ),
+                      ),
+                    ),
+                    icon: const Icon(Icons.calendar_view_week_rounded),
+                    label: const Text("Fix LAST 7 DAYS"),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _runFixLast7DaysFromCallLog();
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.all(14),
+                      backgroundColor: Colors.white,
+                      foregroundColor: _accentIndigo,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(
+                          color: _accentIndigo.withOpacity(0.4),
+                        ),
+                      ),
+                    ),
+                    icon: const Icon(Icons.calendar_month_rounded),
+                    label: const Text("Fix LAST 30 DAYS"),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _runFixLast30DaysFromCallLog();
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -493,7 +614,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 10),
 
-                    // 2 cards per row using LayoutBuilder
+                    // 2 cards per row
                     LayoutBuilder(
                       builder: (context, constraints) {
                         final cardWidth = (constraints.maxWidth - 12) / 2;
@@ -515,19 +636,27 @@ class _HomeScreenState extends State<HomeScreen> {
                               icon: Icons.notifications_active_rounded,
                               width: cardWidth,
                             ),
-                            _statCard(
-                              title: "Missed Calls (latest)",
-                              value: missedCount,
-                              color: _accentRed,
-                              icon: Icons.call_missed_rounded,
-                              width: cardWidth,
+                            // clickable Missed
+                            GestureDetector(
+                              onTap: () => _openLeadListWithFilter('Missed'),
+                              child: _statCard(
+                                title: "Missed Calls (latest)",
+                                value: missedCount,
+                                color: _accentRed,
+                                icon: Icons.call_missed_rounded,
+                                width: cardWidth,
+                              ),
                             ),
-                            _statCard(
-                              title: "Rejected Calls (latest)",
-                              value: rejectedCount,
-                              color: _accentRed.withOpacity(0.85),
-                              icon: Icons.call_end_rounded,
-                              width: cardWidth,
+                            // clickable Rejected
+                            GestureDetector(
+                              onTap: () => _openLeadListWithFilter('Rejected'),
+                              child: _statCard(
+                                title: "Rejected Calls (latest)",
+                                value: rejectedCount,
+                                color: _accentRed.withOpacity(0.85),
+                                icon: Icons.call_end_rounded,
+                                width: cardWidth,
+                              ),
                             ),
                           ],
                         );
@@ -538,7 +667,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                     const SizedBox(height: 12),
 
-                    // Call log fix card
+                    // Simple card with one button that opens bottom sheet
                     Card(
                       elevation: 3,
                       shape: RoundedRectangleBorder(
@@ -581,76 +710,22 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             ),
                             const SizedBox(height: 14),
-
                             SizedBox(
                               width: double.infinity,
                               child: ElevatedButton.icon(
                                 style: ElevatedButton.styleFrom(
                                   padding: const EdgeInsets.all(14),
-                                  backgroundColor: _accentTeal,
+                                  backgroundColor: _accentIndigo,
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(12),
                                   ),
                                 ),
-                                icon: const Icon(Icons.today),
+                                icon: const Icon(Icons.tune_rounded),
                                 label: const Text(
-                                  "Fix TODAY's calls",
+                                  "Choose range & fix",
                                   style: TextStyle(fontSize: 15),
                                 ),
-                                onPressed:
-                                    _syncing ? null : _runFixTodayFromCallLog,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            SizedBox(
-                              width: double.infinity,
-                              child: ElevatedButton.icon(
-                                style: ElevatedButton.styleFrom(
-                                  padding: const EdgeInsets.all(14),
-                                  backgroundColor: Colors.white,
-                                  foregroundColor: _accentIndigo,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                    side: BorderSide(
-                                      color: _accentIndigo.withOpacity(0.4),
-                                    ),
-                                  ),
-                                ),
-                                icon: const Icon(
-                                    Icons.calendar_view_week_rounded),
-                                label: const Text(
-                                  "Fix LAST 7 DAYS",
-                                  style: TextStyle(fontSize: 15),
-                                ),
-                                onPressed: _syncing
-                                    ? null
-                                    : _runFixLast7DaysFromCallLog,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            SizedBox(
-                              width: double.infinity,
-                              child: ElevatedButton.icon(
-                                style: ElevatedButton.styleFrom(
-                                  padding: const EdgeInsets.all(14),
-                                  backgroundColor: Colors.white,
-                                  foregroundColor: _accentIndigo,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                    side: BorderSide(
-                                      color: _accentIndigo.withOpacity(0.4),
-                                    ),
-                                  ),
-                                ),
-                                icon:
-                                    const Icon(Icons.calendar_month_rounded),
-                                label: const Text(
-                                  "Fix LAST 30 DAYS",
-                                  style: TextStyle(fontSize: 15),
-                                ),
-                                onPressed: _syncing
-                                    ? null
-                                    : _runFixLast30DaysFromCallLog,
+                                onPressed: _syncing ? null : _showFixOptionsSheet,
                               ),
                             ),
                           ],

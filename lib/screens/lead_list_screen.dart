@@ -1,24 +1,25 @@
 // lib/screens/lead_list_screen.dart
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart'; // for defaultTargetPlatform, kIsWeb
+import 'package:flutter/foundation.dart'; // defaultTargetPlatform, kIsWeb
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/lead.dart';
 import '../services/lead_service.dart';
 import 'lead_form_screen.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 // -------------------------------------------------------------------------
-// ✨ Premium visual theme (light/white + subtle accents)
+// ✨ Premium visual theme (gradients, glossy accents, subtle animations)
 // -------------------------------------------------------------------------
-const Color _primaryColor = Color(0xFF111827); // near-black
+const Color _primaryColor = Color(0xFF0F172A); // deep navy
 const Color _accentColor = Color(0xFFFFC857); // warm gold
-const Color _mutedBg = Color(0xFFF9FAFB);
+const Color _mutedBg = Color(0xFFF4F6F9);
 const Gradient _appBarGradient = LinearGradient(
   begin: Alignment.topLeft,
   end: Alignment.bottomRight,
-  colors: [Color(0xFF111827), Color(0xFF1F2937)],
+  colors: [Color(0xFF0F172A), Color(0xFF1E2A78)],
 );
 const Gradient _cardGradient = LinearGradient(
   begin: Alignment.topLeft,
@@ -27,13 +28,19 @@ const Gradient _cardGradient = LinearGradient(
 );
 
 class LeadListScreen extends StatefulWidget {
-  const LeadListScreen({super.key});
+  /// Optional initial filter ("All", "Incoming", "Outgoing", "Missed", "Rejected", "Today")
+  final String? initialFilter;
+
+  const LeadListScreen({
+    super.key,
+    this.initialFilter,
+  });
 
   @override
   State<LeadListScreen> createState() => _LeadListScreenState();
 }
 
-// Lightweight model for the latest call from subcollection
+// Lightweight model for the latest call (only from /calls subcollection)
 class LatestCall {
   final String? callId;
   final String? phoneNumber;
@@ -83,45 +90,48 @@ class LatestCall {
 
 class _LeadListScreenState extends State<LeadListScreen>
     with TickerProviderStateMixin {
-  // Use the singleton instance so cache is shared across app
+  // Use singleton so cache is shared
   final LeadService _service = LeadService.instance;
 
-  // mutable lists used by the UI
   List<Lead> _allLeads = [];
   List<Lead> _filteredLeads = [];
   bool _loading = true;
 
   final TextEditingController _searchCtrl = TextEditingController();
 
-  // State for the call filter
+  // Filter state
   String _selectedFilter = 'All';
-  final List<String> _filters = [
+  final List<String> _filters = const [
     'All',
     'Incoming',
     'Outgoing',
     'Answered',
     'Missed',
     'Rejected',
-    'Today', // today's follow-ups
+    'Today',
   ];
 
-  // Map leadId -> LatestCall (fetched from calls subcollection)
+  // Map leadId -> LatestCall from /calls subcollection
   final Map<String, LatestCall?> _latestCallByLead = {};
   bool _loadingLatestCalls = false;
 
-  // pressed/active state for tap animation
+  // For press animation
   String? _pressedLeadId;
 
-  // small animation controller for FAB pulse
   late final AnimationController _fabController;
 
   @override
   void initState() {
     super.initState();
+
     _fabController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1400),
     )..repeat(reverse: true);
+
+    // Use initialFilter from caller (e.g. "Missed" / "Rejected")
+    _selectedFilter = widget.initialFilter ?? 'All';
+
     _loadLeads();
     _searchCtrl.addListener(_applySearch);
   }
@@ -134,12 +144,15 @@ class _LeadListScreenState extends State<LeadListScreen>
     super.dispose();
   }
 
-  /// Fetch the single most recent call doc for the given lead.
+  // ---------------------------------------------------------------------------
+  // FIRESTORE LOADERS
+  // ---------------------------------------------------------------------------
+
+  /// Fetch the single most recent call doc for the given lead from /calls.
   Future<LatestCall?> fetchLatestCallForLead(String leadId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final tenantId =
-          (prefs.getString('tenantId') ?? 'default_tenant').toString();
+      final tenantId = (prefs.getString('tenantId') ?? 'default_tenant');
 
       final q = await FirebaseFirestore.instance
           .collection('tenants')
@@ -154,26 +167,26 @@ class _LeadListScreenState extends State<LeadListScreen>
       if (q.docs.isEmpty) return null;
       return LatestCall.fromDoc(q.docs.first);
     } catch (e, st) {
+      // ignore but log
       // ignore: avoid_print
       print("fetchLatestCallForLead error for $leadId: $e\n$st");
       return null;
     }
   }
 
-  /// Load leads and in parallel fetch latest calls (batched to avoid too many concurrent reads)
+  /// Load leads and in parallel fetch latest calls; only keep leads that
+  /// actually have at least one /calls doc.
   Future<void> _loadLeads() async {
     setState(() => _loading = true);
 
     await _service.loadLeads();
-
     final fetched = _service.getAll();
     _allLeads = List<Lead>.from(fetched);
 
-    // Clear previous latest map
     _latestCallByLead.clear();
     _loadingLatestCalls = true;
+    setState(() {});
 
-    // Fetch latest calls in batches to limit concurrent reads
     const int batchSize = 10;
     for (var i = 0; i < _allLeads.length; i += batchSize) {
       final batch = _allLeads.skip(i).take(batchSize).toList();
@@ -182,18 +195,23 @@ class _LeadListScreenState extends State<LeadListScreen>
       for (var j = 0; j < batch.length; j++) {
         _latestCallByLead[batch[j].id] = results[j];
       }
-      setState(() {});
+      if (mounted) setState(() {});
     }
 
-    _applySearch(); // Apply search and filter after loading
+    _loadingLatestCalls = false;
 
-    setState(() {
-      _loading = false;
-      _loadingLatestCalls = false;
-    });
+    // Apply search & filter after everything loaded
+    _applySearch();
+
+    if (mounted) {
+      setState(() => _loading = false);
+    }
   }
 
-  // Format a DateTime to 24-hour time (HH:mm) using local timezone.
+  // ---------------------------------------------------------------------------
+  // TIME HELPERS
+  // ---------------------------------------------------------------------------
+
   String _formatTime24(DateTime dt) {
     final local = dt.toLocal();
     final hh = local.hour.toString().padLeft(2, '0');
@@ -201,14 +219,12 @@ class _LeadListScreenState extends State<LeadListScreen>
     return '$hh:$mm';
   }
 
-  // Helper: is the provided DateTime 'today' local
   bool _isSameLocalDay(DateTime a, DateTime b) {
     final la = a.toLocal();
     final lb = b.toLocal();
     return la.year == lb.year && la.month == lb.month && la.day == lb.day;
   }
 
-  // Count today's followups (based on lead.nextFollowUp if present, else ignore)
   int get todaysFollowupCount {
     final now = DateTime.now();
     return _allLeads.where((lead) {
@@ -225,58 +241,58 @@ class _LeadListScreenState extends State<LeadListScreen>
     });
   }
 
-  // --- Missed / Rejected detection using subcollection + outcome + duration ---
+  // ---------------------------------------------------------------------------
+  // MISSED / REJECTED HEURISTICS (only from /calls)
+  // ---------------------------------------------------------------------------
+
   bool _isMissedCall(LatestCall? latest) {
     if (latest == null) return false;
 
     final dir = latest.direction?.toLowerCase();
     final dur = latest.durationInSeconds ?? 0;
-    final outcome = latest.finalOutcome ?? '';
+    final outcome = (latest.finalOutcome ?? '').toLowerCase();
 
-    // Condition 1: inbound + 0 sec => missed
+    // inbound + 0 sec OR explicit missed
     if (dir == 'inbound' && dur == 0) return true;
-
-    // Condition 2: finalOutcome explicitly "missed"
     if (outcome == 'missed') return true;
 
     return false;
   }
 
- bool _isRejectedCall(LatestCall? latest) {
-  if (latest == null) return false;
+  bool _isRejectedCall(LatestCall? latest) {
+    if (latest == null) return false;
 
-  final dir = latest.direction?.toLowerCase();
-  final dur = latest.durationInSeconds ?? 0;
-  final outcome = latest.finalOutcome ?? '';
+    final dir = latest.direction?.toLowerCase();
+    final dur = latest.durationInSeconds ?? 0;
+    final outcome = (latest.finalOutcome ?? '').toLowerCase();
 
-  // Only consider OUTGOING calls as "rejected"
-  if (dir != 'outbound') return false;
+    // Only outgoing are considered rejected
+    if (dir != 'outbound') return false;
 
-  // outbound + 0 sec  OR  outbound + finalOutcome == "rejected"
-  if (dur == 0) return true;
-  if (outcome == 'rejected') return true;
+    if (dur == 0) return true;
+    if (outcome == 'rejected') return true;
 
-  return false;
-}
+    return false;
+  }
 
+  // ---------------------------------------------------------------------------
+  // SEARCH + FILTER
+  // ---------------------------------------------------------------------------
 
   void _applySearch() {
     final query = _searchCtrl.text.toLowerCase();
 
-    // 1. Apply text search AND require that there IS a /calls doc
+    // 1. Text search
     List<Lead> searchFiltered = _allLeads.where((l) {
-      final latest = _latestCallByLead[l.id];
-      if (latest == null) return false; // ⛔ hide leads with no /calls
+      final hasLatest = _latestCallByLead[l.id] != null;
+      if (!hasLatest) return false; // strictly require /calls doc
       return l.name.toLowerCase().contains(query) ||
           l.phoneNumber.contains(query);
     }).toList();
 
-    // 2. Apply filter
+    // 2. Apply filter (using only _latestCallByLead)
     List<Lead> afterFilter = searchFiltered.where((l) {
-      if (_selectedFilter == 'All') {
-        // already guaranteed latest != null above
-        return true;
-      }
+      if (_selectedFilter == 'All') return true;
 
       if (_selectedFilter == 'Today') {
         final nf = l.nextFollowUp;
@@ -285,13 +301,13 @@ class _LeadListScreenState extends State<LeadListScreen>
       }
 
       final LatestCall? latest = _latestCallByLead[l.id];
-      if (latest == null) return false; // defensive
+      if (latest == null) return false; // we already checked, but safe
 
       final direction = latest.direction?.toLowerCase();
+      final dur = latest.durationInSeconds ?? 0;
 
       if (_selectedFilter == 'Answered') {
-        return latest.durationInSeconds != null &&
-            (latest.durationInSeconds! > 0);
+        return dur > 0;
       }
 
       if (_selectedFilter == 'Missed') {
@@ -302,22 +318,25 @@ class _LeadListScreenState extends State<LeadListScreen>
         return _isRejectedCall(latest);
       }
 
-      if (_selectedFilter == 'Incoming') return direction == 'inbound';
-      if (_selectedFilter == 'Outgoing') return direction == 'outbound';
+      if (_selectedFilter == 'Incoming') {
+        return direction == 'inbound';
+      }
+
+      if (_selectedFilter == 'Outgoing') {
+        return direction == 'outbound';
+      }
 
       return false;
     }).toList();
 
-    // 3. Sort strictly by latest call timestamps from /calls
+    // 3. Sort by most recent call (from /calls)
     afterFilter.sort((a, b) {
-      final la = _latestCallByLead[a.id];
-      final lb = _latestCallByLead[b.id];
-
-      final aTime =
-          (la?.finalizedAt ?? la?.createdAt) ?? DateTime.fromMillisecondsSinceEpoch(0);
-      final bTime =
-          (lb?.finalizedAt ?? lb?.createdAt) ?? DateTime.fromMillisecondsSinceEpoch(0);
-
+      DateTime aTime = (_latestCallByLead[a.id]?.finalizedAt ??
+              _latestCallByLead[a.id]?.createdAt) ??
+          a.lastInteraction;
+      DateTime bTime = (_latestCallByLead[b.id]?.finalizedAt ??
+              _latestCallByLead[b.id]?.createdAt) ??
+          b.lastInteraction;
       return bTime.compareTo(aTime);
     });
 
@@ -326,11 +345,10 @@ class _LeadListScreenState extends State<LeadListScreen>
     });
   }
 
-  // Method to handle filter change
   void _changeFilter(String filter) {
     setState(() {
       _selectedFilter = filter;
-      _applySearch(); // Re-filter the list
+      _applySearch();
     });
   }
 
@@ -339,7 +357,7 @@ class _LeadListScreenState extends State<LeadListScreen>
     if (_isSameLocalDay(dt, now)) return 'Today';
     final yesterday = now.subtract(const Duration(days: 1));
     if (_isSameLocalDay(dt, yesterday)) return 'Yesterday';
-    final months = [
+    const months = [
       'Jan',
       'Feb',
       'Mar',
@@ -356,7 +374,6 @@ class _LeadListScreenState extends State<LeadListScreen>
     return '${dt.day} ${months[dt.month - 1]} ${dt.year}';
   }
 
-  // Build grouped list: Map<header, List<Lead>>
   List<Widget> _buildGroupedList() {
     if (_filteredLeads.isEmpty) {
       return [
@@ -374,11 +391,8 @@ class _LeadListScreenState extends State<LeadListScreen>
 
     for (var lead in _filteredLeads) {
       final latest = _latestCallByLead[lead.id];
-      if (latest == null) continue; // should not happen due to filtering
-
       final dt =
-          (latest.finalizedAt ?? latest.createdAt) ??
-              DateTime.fromMillisecondsSinceEpoch(0);
+          (latest?.finalizedAt ?? latest?.createdAt) ?? lead.lastInteraction;
 
       final header = _formatHeaderDate(dt);
       grouped.putIfAbsent(header, () => []).add(lead);
@@ -421,11 +435,11 @@ class _LeadListScreenState extends State<LeadListScreen>
     return widgets;
   }
 
-  // -----------------------------------------
-  // DIALER / PHONE HELPERS
-  // -----------------------------------------
+  // ---------------------------------------------------------------------------
+  // PHONE HELPERS
+  // ---------------------------------------------------------------------------
 
-  // Sanitize phone number and normalize for dialing/WhatsApp.
+  // Normalize phone for dialing / WhatsApp
   String _sanitizePhone(String? raw) {
     if (raw == null) return '';
     var trimmed = raw.trim();
@@ -502,8 +516,7 @@ class _LeadListScreenState extends State<LeadListScreen>
         return;
       }
 
-      print(
-          "⚠️ launchUrl returned false; trying fallback launchUrlString...");
+      print("⚠️ launchUrl returned false; trying fallback launchUrlString...");
       final fallback = "tel:$number";
       bool fallbackResult = false;
       try {
@@ -532,16 +545,13 @@ class _LeadListScreenState extends State<LeadListScreen>
       print("Error: $e");
       print("Stacktrace: $st");
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Error while trying to open dialer.'),
-        ),
+        const SnackBar(content: Text('Error while trying to open dialer.')),
       );
     }
 
     print("=== DIALER DEBUG END ===");
   }
 
-  /// Open WhatsApp chat with the given phone number (uses wa.me).
   Future<void> _openWhatsApp(String? rawNumber) async {
     print("=== WHATSAPP DEBUG START ===");
 
@@ -610,31 +620,32 @@ class _LeadListScreenState extends State<LeadListScreen>
     print("=== WHATSAPP DEBUG END ===");
   }
 
-  // -----------------------------------------
-  // UI: ANIMATED, GLOSSY LEAD ROW
-  // -----------------------------------------
+  // ---------------------------------------------------------------------------
+  // ROW UI
+  // ---------------------------------------------------------------------------
+
   Widget _leadRow(Lead lead) {
     final latest = _latestCallByLead[lead.id];
 
-    // If somehow no latest (should already be filtered out), skip.
-    if (latest == null) {
-      return const SizedBox.shrink();
-    }
-
-    // duration & last time from latest call in subcollection
     String durationLabel = '';
     String lastCallTimeLabel = '';
 
-    if (latest.durationInSeconds != null) {
-      final d = latest.durationInSeconds!;
-      final mins = d ~/ 60;
-      final secs = d % 60;
-      durationLabel = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
+    if (latest != null) {
+      if (latest.durationInSeconds != null) {
+        final d = latest.durationInSeconds!;
+        final mins = d ~/ 60;
+        final secs = d % 60;
+        durationLabel = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
+      }
+
+      final dt = latest.finalizedAt ?? latest.createdAt;
+      if (dt != null) {
+        lastCallTimeLabel = _formatTime24(dt);
+      }
     }
 
-    final dt = latest.finalizedAt ?? latest.createdAt;
-    if (dt != null) {
-      lastCallTimeLabel = _formatTime24(dt);
+    if (lastCallTimeLabel.isEmpty && lead.lastInteraction != null) {
+      lastCallTimeLabel = _formatTime24(lead.lastInteraction);
     }
 
     final subtitleText =
@@ -642,66 +653,44 @@ class _LeadListScreenState extends State<LeadListScreen>
 
     final isPressed = _pressedLeadId == lead.id;
 
-    // Missed / rejected badges
+    // BADGES for missed / rejected
     final bool isMissed = _isMissedCall(latest);
     final bool isRejected = _isRejectedCall(latest);
 
-    Widget? _buildStatusBadge() {
-      if (isMissed) {
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.red.shade50,
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: Colors.red.shade200),
+    Widget? badge;
+    if (isMissed) {
+      badge = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: Colors.red.shade50,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          'MISSED',
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            color: Colors.red.shade700,
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.phone_missed,
-                  size: 14, color: Colors.red.shade700),
-              const SizedBox(width: 4),
-              Text(
-                'Missed',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.red.shade800,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
+        ),
+      );
+    } else if (isRejected) {
+      badge = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: Colors.red.shade50,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          'REJECTED',
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            color: Colors.red.shade700,
           ),
-        );
-      }
-      if (isRejected) {
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.red.shade50,
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: Colors.red.shade200),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.call_end, size: 14, color: Colors.red.shade700),
-              const SizedBox(width: 4),
-              Text(
-                'Rejected',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.red.shade800,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-        );
-      }
-      return null;
+        ),
+      );
     }
-
-    final statusBadge = _buildStatusBadge();
 
     return GestureDetector(
       onTapDown: (_) => setState(() => _pressedLeadId = lead.id),
@@ -712,12 +701,10 @@ class _LeadListScreenState extends State<LeadListScreen>
           context,
           PageRouteBuilder(
             transitionDuration: const Duration(milliseconds: 280),
-            pageBuilder: (_, __, ___) => LeadFormScreen(
-              lead: lead,
-              autoOpenedFromCall: false,
-            ),
+            pageBuilder: (_, __, ___) =>
+                LeadFormScreen(lead: lead, autoOpenedFromCall: false),
           ),
-        ).then((_) => _loadLeads());
+        ).then((_) => _loadLeads()); // refresh when returning
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
@@ -738,7 +725,7 @@ class _LeadListScreenState extends State<LeadListScreen>
         transform: Matrix4.identity()..scale(isPressed ? 0.995 : 1.0),
         child: Row(
           children: [
-            // direction icon
+            // icon
             Container(
               width: 44,
               height: 44,
@@ -753,15 +740,14 @@ class _LeadListScreenState extends State<LeadListScreen>
                     color: Colors.black.withOpacity(0.04),
                     blurRadius: 6,
                     offset: const Offset(0, 3),
-                  )
+                  ),
                 ],
               ),
               child: Center(child: _directionIcon(lead)),
             ),
-
             const SizedBox(width: 14),
 
-            // Main text
+            // main text
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -771,7 +757,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                       Expanded(
                         child: Text(
                           lead.name.isEmpty ? 'No name' : lead.name,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w700,
                             color: _primaryColor,
@@ -780,35 +766,15 @@ class _LeadListScreenState extends State<LeadListScreen>
                         ),
                       ),
                       const SizedBox(width: 8),
-                      // ⏰ Last call time as chip (strictly from /calls)
-                      if (lastCallTimeLabel.isNotEmpty)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(999),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.access_time,
-                                size: 12,
-                                color: Colors.blueGrey.shade400,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                lastCallTimeLabel,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.blueGrey.shade600,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
+                      if (badge != null) badge,
+                      if (badge != null) const SizedBox(width: 6),
+                      Text(
+                        lastCallTimeLabel.isNotEmpty ? lastCallTimeLabel : '',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.blueGrey.shade400,
                         ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 6),
@@ -846,17 +812,13 @@ class _LeadListScreenState extends State<LeadListScreen>
                         ),
                     ],
                   ),
-                  if (statusBadge != null) ...[
-                    const SizedBox(height: 6),
-                    statusBadge,
-                  ],
                 ],
               ),
             ),
 
             const SizedBox(width: 8),
 
-            // Call + WhatsApp (vertical)
+            // call + whatsapp buttons, vertical
             Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -870,7 +832,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                         color: Colors.black.withOpacity(0.03),
                         blurRadius: 6,
                         offset: const Offset(0, 3),
-                      )
+                      ),
                     ],
                   ),
                   child: IconButton(
@@ -891,7 +853,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                         color: Colors.black.withOpacity(0.03),
                         blurRadius: 6,
                         offset: const Offset(0, 3),
-                      )
+                      ),
                     ],
                   ),
                   child: IconButton(
@@ -921,19 +883,18 @@ class _LeadListScreenState extends State<LeadListScreen>
     final latest = _latestCallByLead[lead.id];
     final dir = latest?.direction?.toLowerCase();
     if (dir == 'inbound') {
-      return Icon(Icons.call_received,
-          color: Colors.green.shade700, size: 20);
+      return Icon(Icons.call_received, color: Colors.green.shade700, size: 20);
     }
     if (dir == 'outbound') {
-      return const Icon(Icons.call_made, color: _primaryColor, size: 20);
+      return Icon(Icons.call_made, color: _primaryColor, size: 20);
     }
-    return Icon(Icons.person,
-        color: Colors.blueGrey.shade600, size: 20);
+    return Icon(Icons.person, color: Colors.blueGrey.shade600, size: 20);
   }
 
-  // -----------------------------------------
+  // ---------------------------------------------------------------------------
   // MAIN UI
-  // -----------------------------------------
+  // ---------------------------------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
     final groupedWidgets = _buildGroupedList();
@@ -949,7 +910,7 @@ class _LeadListScreenState extends State<LeadListScreen>
               BoxShadow(
                 color: Colors.black.withOpacity(0.08),
                 blurRadius: 10,
-              )
+              ),
             ],
           ),
           child: SafeArea(
@@ -1000,7 +961,9 @@ class _LeadListScreenState extends State<LeadListScreen>
                     },
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
                       decoration: BoxDecoration(
                         gradient: LinearGradient(
                           colors: [
@@ -1014,7 +977,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                             color: Colors.black.withOpacity(0.12),
                             blurRadius: 8,
                             offset: const Offset(0, 3),
-                          )
+                          ),
                         ],
                       ),
                       child: const Row(
@@ -1052,7 +1015,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                   autoOpenedFromCall: false,
                 ),
               ),
-            ).then((_) => _loadLeads());
+            ).then((_) => _loadLeads()); // refresh after new lead
           },
           child: Container(
             width: 64,
@@ -1072,7 +1035,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                   color: _accentColor.withOpacity(0.4),
                   blurRadius: 18,
                   offset: const Offset(0, 10),
-                )
+                ),
               ],
             ),
             child: const Icon(Icons.add, color: _primaryColor, size: 30),
@@ -1112,7 +1075,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                             const SizedBox(width: 12),
                             Expanded(
                               child: Text(
-                                "Today's follow-ups: $todaysFollowupCount — tap to view",
+                                'Today\'s follow-ups: $todaysFollowupCount — tap to view',
                                 style: TextStyle(
                                   fontWeight: FontWeight.w700,
                                   color: Colors.orange.shade900,
@@ -1136,8 +1099,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                   child: TextField(
                     controller: _searchCtrl,
                     decoration: InputDecoration(
-                      prefixIcon:
-                          const Icon(Icons.search, color: _primaryColor),
+                      prefixIcon: const Icon(Icons.search, color: _primaryColor),
                       hintText: "Search by name or phone",
                       filled: true,
                       fillColor: Colors.white,
@@ -1175,7 +1137,8 @@ class _LeadListScreenState extends State<LeadListScreen>
                           duration:
                               const Duration(milliseconds: 260),
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 10),
+                            horizontal: 10,
+                          ),
                           decoration: BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(20),
@@ -1226,9 +1189,15 @@ class _LeadListScreenState extends State<LeadListScreen>
 
                 const SizedBox(height: 10),
 
+                // LIST with pull-to-refresh
                 Expanded(
-                  child: ListView(
-                    children: groupedWidgets,
+                  child: RefreshIndicator(
+                    onRefresh: _loadLeads,
+                    child: ListView(
+                      physics:
+                          const AlwaysScrollableScrollPhysics(),
+                      children: groupedWidgets,
+                    ),
                   ),
                 ),
               ],
