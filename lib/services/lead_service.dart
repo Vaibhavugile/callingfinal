@@ -41,7 +41,8 @@ class LeadService {
 
   /// Resolve the tenant-scoped leads collection:
   /// /tenants/{tenantId}/leads
-  Future<CollectionReference<Map<String, dynamic>>> _tenantLeadsCollection() async {
+  Future<CollectionReference<Map<String, dynamic>>>
+      _tenantLeadsCollection() async {
     final tenant = await _getTenantId();
     return _db.collection('tenants').doc(tenant).collection('leads');
   }
@@ -297,7 +298,7 @@ class LeadService {
   }
 
   // -------------------------------------------------------------------------
-  // addCallEvent
+  // addCallEvent  (LIVE events – can update lead + callHistory)
   // -------------------------------------------------------------------------
   Future<Lead> addCallEvent({
     required String phone,
@@ -319,7 +320,8 @@ class LeadService {
     final last = hist.isNotEmpty ? hist.last : null;
 
     if (last != null) {
-      final dt = (entry.timestamp.difference(last.timestamp)).inMilliseconds.abs();
+      final dt =
+          (entry.timestamp.difference(last.timestamp)).inMilliseconds.abs();
       final dupe = last.outcome == entry.outcome &&
           last.direction == entry.direction &&
           last.durationInSeconds == entry.durationInSeconds &&
@@ -341,7 +343,7 @@ class LeadService {
   }
 
   // -------------------------------------------------------------------------
-  // addFinalCallEvent
+  // addFinalCallEvent  (LIVE final events – can update lead + callHistory)
   // -------------------------------------------------------------------------
   Future<Lead?> addFinalCallEvent({
     required String phone,
@@ -414,6 +416,164 @@ class LeadService {
     }
 
     return updated;
+  }
+
+  // -------------------------------------------------------------------------
+  // 🔹 NEW: updateCallFromCallLog  (used by "Fix from Call Log" button)
+  //
+  // IMPORTANT:
+  //  - DOES NOT create leads.
+  //  - Only patches /calls doc fields:
+  //      direction, durationInSeconds, finalOutcome
+  //      + reconciliation flags
+  //  - If no lead exists for that number → skip.
+  // -------------------------------------------------------------------------
+  Future<void> updateCallFromCallLog({
+    required String phone,
+    required String direction,
+    required DateTime timestamp,
+    required int durationInSeconds,
+    required String finalOutcome,
+  }) async {
+    try {
+      final tenantId = await _getTenantId();
+      final digits = _normalize(phone);
+
+      if (digits.isEmpty) {
+        print('ℹ️ updateCallFromCallLog: empty normalized phone, skipping');
+        return;
+      }
+
+      // 1) Try to find existing lead by phone (cache first)
+      Lead? lead = _findInCacheByNormalized(digits);
+
+      // 2) If not in cache, do a Firestore query — BUT DO NOT CREATE
+      if (lead == null) {
+        final col = await _tenantLeadsCollection();
+        final snap = await col
+            .where('phoneNumber', isEqualTo: digits)
+            .limit(1)
+            .get();
+        if (snap.docs.isNotEmpty) {
+          final doc = snap.docs.first;
+          lead = Lead.fromMap(Map<String, dynamic>.from(doc.data()))
+              .copyWith(id: doc.id);
+
+          // put into cache for next time
+          _cached.removeWhere((l) => l.id == lead!.id);
+          _cached.add(lead!);
+        }
+      }
+
+      // 3) If still no lead → we DO NOT create anything, just return
+      if (lead == null) {
+        print(
+            'ℹ️ updateCallFromCallLog: no existing lead for phone=$digits, skipping.');
+        return;
+      }
+
+      final leadId = lead.id;
+      if (leadId.isEmpty) {
+        print(
+            'ℹ️ updateCallFromCallLog: found lead with empty id for phone=$digits, skipping.');
+        return;
+      }
+
+      final callsRef = _db
+          .collection('tenants')
+          .doc(tenantId)
+          .collection('leads')
+          .doc(leadId)
+          .collection('calls');
+
+      // 4) Fetch recent calls for that lead and match by phone (normalized)
+      final qSnap = await callsRef
+          .orderBy('createdAt', descending: true)
+          .limit(20)
+          .get();
+
+      if (qSnap.docs.isEmpty) {
+        print(
+            'ℹ️ updateCallFromCallLog: no calls found under lead=$leadId for phone=$digits');
+        return;
+      }
+
+      final DateTime targetTs = timestamp;
+      DocumentSnapshot<Map<String, dynamic>>? bestDoc;
+      int bestDiffMs = 1 << 30;
+
+      for (final doc in qSnap.docs) {
+        final data = doc.data();
+        final rawPhone = data['phoneNumber'] as String?;
+        if (rawPhone == null) continue;
+
+        // Normalize stored phone to be safe
+        final storedDigits = _normalize(rawPhone);
+        if (storedDigits != digits) continue;
+
+        final createdAtTs = data['createdAt'] as Timestamp?;
+        if (createdAtTs == null) continue;
+
+        final createdAt = createdAtTs.toDate();
+        final diffMs = createdAt.difference(targetTs).inMilliseconds.abs();
+
+        if (diffMs < bestDiffMs) {
+          bestDiffMs = diffMs;
+          bestDoc = doc;
+        }
+      }
+
+      if (bestDoc == null) {
+        print(
+            'ℹ️ updateCallFromCallLog: no matching call doc by time+phone for lead=$leadId phone=$digits');
+        return;
+      }
+
+      // Require "close enough": <= 2 minutes
+      const maxDiffMs = 2 * 60 * 1000;
+      if (bestDiffMs > maxDiffMs) {
+        print(
+            'ℹ️ updateCallFromCallLog: closest doc too far (${bestDiffMs}ms) for lead=$leadId phone=$digits, skipping.');
+        return;
+      }
+
+      final existing = bestDoc.data() ?? {};
+
+      // If already reconciled with same values, skip
+      final alreadyReconciled =
+          (existing['callLogReconciled'] == true) &&
+              (existing['durationInSeconds'] == durationInSeconds) &&
+              (existing['finalOutcome']?.toString().toLowerCase() ==
+                  finalOutcome.toLowerCase()) &&
+              (existing['direction']?.toString().toLowerCase() ==
+                  direction.toLowerCase());
+
+      if (alreadyReconciled) {
+        print(
+            'ℹ️ updateCallFromCallLog: call ${bestDoc.id} already reconciled, skipping.');
+        return;
+      }
+
+      final Map<String, dynamic> patch = {
+        'direction': direction,
+        'durationInSeconds': durationInSeconds,
+        'finalOutcome': finalOutcome,
+
+        // DO NOT touch createdAt / finalizedAt
+
+        'callLogReconciled': true,
+        'callLogReconciledAt': FieldValue.serverTimestamp(),
+        'callLogReconciledSource': 'flutter_call_log_fix',
+        'callLogReconciledTimestamp': Timestamp.fromDate(timestamp),
+      };
+
+      await bestDoc.reference.update(patch);
+
+      print(
+          '✅ updateCallFromCallLog: patched call ${bestDoc.id} for lead=$leadId phone=$digits diffMs=$bestDiffMs');
+    } catch (e, st) {
+      print('❌ updateCallFromCallLog error for phone=$phone: $e\n$st');
+    }
   }
 
   // -------------------------------------------------------------------------

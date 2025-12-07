@@ -10,15 +10,15 @@ import 'lead_form_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // -------------------------------------------------------------------------
-// ✨ Premium visual theme (gradients, glossy accents, subtle animations)
+// ✨ Premium visual theme (light/white + subtle accents)
 // -------------------------------------------------------------------------
-const Color _primaryColor = Color(0xFF0F172A); // Deep navy
-const Color _accentColor = Color(0xFFFFC857); // Warm gold
-const Color _mutedBg = Color(0xFFF4F6F9);
+const Color _primaryColor = Color(0xFF111827); // near-black
+const Color _accentColor = Color(0xFFFFC857); // warm gold
+const Color _mutedBg = Color(0xFFF9FAFB);
 const Gradient _appBarGradient = LinearGradient(
   begin: Alignment.topLeft,
   end: Alignment.bottomRight,
-  colors: [Color(0xFF0F172A), Color(0xFF1E2A78)],
+  colors: [Color(0xFF111827), Color(0xFF1F2937)],
 );
 const Gradient _cardGradient = LinearGradient(
   begin: Alignment.topLeft,
@@ -33,7 +33,7 @@ class LeadListScreen extends StatefulWidget {
   State<LeadListScreen> createState() => _LeadListScreenState();
 }
 
-// Lightweight model for the latest call (kept local here to avoid requiring lead.dart edits)
+// Lightweight model for the latest call from subcollection
 class LatestCall {
   final String? callId;
   final String? phoneNumber;
@@ -41,6 +41,7 @@ class LatestCall {
   final int? durationInSeconds;
   final DateTime? createdAt;
   final DateTime? finalizedAt;
+  final String? finalOutcome;
 
   LatestCall({
     this.callId,
@@ -49,6 +50,7 @@ class LatestCall {
     this.durationInSeconds,
     this.createdAt,
     this.finalizedAt,
+    this.finalOutcome,
   });
 
   factory LatestCall.fromDoc(QueryDocumentSnapshot doc) {
@@ -69,14 +71,18 @@ class LatestCall {
       callId: doc.id,
       phoneNumber: (data['phoneNumber'] as String?)?.trim(),
       direction: (data['direction'] as String?)?.toLowerCase(),
-      durationInSeconds: data['durationInSeconds'] is num ? (data['durationInSeconds'] as num).toInt() : null,
+      durationInSeconds: data['durationInSeconds'] is num
+          ? (data['durationInSeconds'] as num).toInt()
+          : null,
       createdAt: _toDate(data['createdAt']),
       finalizedAt: _toDate(data['finalizedAt']),
+      finalOutcome: (data['finalOutcome'] as String?)?.toLowerCase(),
     );
   }
 }
 
-class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStateMixin {
+class _LeadListScreenState extends State<LeadListScreen>
+    with TickerProviderStateMixin {
   // Use the singleton instance so cache is shared across app
   final LeadService _service = LeadService.instance;
 
@@ -91,13 +97,12 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
   String _selectedFilter = 'All';
   final List<String> _filters = [
     'All',
-    'Needs Review',
     'Incoming',
     'Outgoing',
     'Answered',
     'Missed',
     'Rejected',
-    'Today' // today's follow-ups
+    'Today', // today's follow-ups
   ];
 
   // Map leadId -> LatestCall (fetched from calls subcollection)
@@ -113,7 +118,10 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
   @override
   void initState() {
     super.initState();
-    _fabController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat(reverse: true);
+    _fabController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
     _loadLeads();
     _searchCtrl.addListener(_applySearch);
   }
@@ -129,9 +137,9 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
   /// Fetch the single most recent call doc for the given lead.
   Future<LatestCall?> fetchLatestCallForLead(String leadId) async {
     try {
-      // Read tenantId from Flutter SharedPreferences (same place AuthService writes)
       final prefs = await SharedPreferences.getInstance();
-      final tenantId = (prefs.getString('tenantId') ?? 'default_tenant').toString();
+      final tenantId =
+          (prefs.getString('tenantId') ?? 'default_tenant').toString();
 
       final q = await FirebaseFirestore.instance
           .collection('tenants')
@@ -146,8 +154,6 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
       if (q.docs.isEmpty) return null;
       return LatestCall.fromDoc(q.docs.first);
     } catch (e, st) {
-      // keep UI resilient: log and return null
-      // single-line print with escaped newline to avoid source-line breaks
       // ignore: avoid_print
       print("fetchLatestCallForLead error for $leadId: $e\n$st");
       return null;
@@ -186,13 +192,14 @@ class _LeadListScreenState extends State<LeadListScreen> with TickerProviderStat
       _loadingLatestCalls = false;
     });
   }
-// Format a DateTime to 24-hour time (HH:mm) using local timezone.
-String _formatTime24(DateTime dt) {
-  final local = dt.toLocal();
-  final hh = local.hour.toString().padLeft(2, '0');
-  final mm = local.minute.toString().padLeft(2, '0');
-  return '$hh:$mm';
-}
+
+  // Format a DateTime to 24-hour time (HH:mm) using local timezone.
+  String _formatTime24(DateTime dt) {
+    final local = dt.toLocal();
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
+    return '$hh:$mm';
+  }
 
   // Helper: is the provided DateTime 'today' local
   bool _isSameLocalDay(DateTime a, DateTime b) {
@@ -217,42 +224,37 @@ String _formatTime24(DateTime dt) {
       _applySearch();
     });
   }
-  // Heuristics to detect missed / rejected calls when you don't store explicit outcomes.
-bool _isMissedCall(LatestCall? latest) {
+
+  // --- Missed / Rejected detection using subcollection + outcome + duration ---
+  bool _isMissedCall(LatestCall? latest) {
+    if (latest == null) return false;
+
+    final dir = latest.direction?.toLowerCase();
+    final dur = latest.durationInSeconds ?? 0;
+    final outcome = latest.finalOutcome ?? '';
+
+    // Condition 1: inbound + 0 sec => missed
+    if (dir == 'inbound' && dur == 0) return true;
+
+    // Condition 2: finalOutcome explicitly "missed"
+    if (outcome == 'missed') return true;
+
+    return false;
+  }
+
+ bool _isRejectedCall(LatestCall? latest) {
   if (latest == null) return false;
 
   final dir = latest.direction?.toLowerCase();
-  final dur = latest.durationInSeconds;
+  final dur = latest.durationInSeconds ?? 0;
+  final outcome = latest.finalOutcome ?? '';
 
-  // Most common heuristic: inbound with zero duration -> missed.
-  if (dir == 'inbound' && dur != null && dur == 0) return true;
+  // Only consider OUTGOING calls as "rejected"
+  if (dir != 'outbound') return false;
 
-  // Fallback: if duration is null but createdAt/finalizedAt difference suggests no conversation
-  if (dir == 'inbound' && dur == null && latest.createdAt != null && latest.finalizedAt != null) {
-    final diff = latest.finalizedAt!.difference(latest.createdAt!).inSeconds;
-    if (diff <= 1) return true; // essentially no call session
-  }
-
-  return false;
-}
-
-bool _isRejectedCall(LatestCall? latest) {
-  if (latest == null) return false;
-
-  final dir = latest.direction?.toLowerCase();
-  final dur = latest.durationInSeconds;
-
-  // Heuristic #1: outbound with zero duration often means the remote party immediately rejected/declined.
-  if (dir == 'outbound' && dur != null && dur == 0) return true;
-
-  // Heuristic #2: extremely short calls (created -> finalized < threshold) often indicate an explicit reject.
-  if (latest.createdAt != null && latest.finalizedAt != null) {
-    final diff = latest.finalizedAt!.difference(latest.createdAt!).inSeconds;
-    if (diff <= 2 && (dur == null || dur == 0)) {
-      // Could be inbound or outbound — treat very very short calls as rejected/declined.
-      return true;
-    }
-  }
+  // outbound + 0 sec  OR  outbound + finalOutcome == "rejected"
+  if (dur == 0) return true;
+  if (outcome == 'rejected') return true;
 
   return false;
 }
@@ -261,14 +263,20 @@ bool _isRejectedCall(LatestCall? latest) {
   void _applySearch() {
     final query = _searchCtrl.text.toLowerCase();
 
-    // 1. Apply text search
+    // 1. Apply text search AND require that there IS a /calls doc
     List<Lead> searchFiltered = _allLeads.where((l) {
-      return l.name.toLowerCase().contains(query) || l.phoneNumber.contains(query);
+      final latest = _latestCallByLead[l.id];
+      if (latest == null) return false; // ⛔ hide leads with no /calls
+      return l.name.toLowerCase().contains(query) ||
+          l.phoneNumber.contains(query);
     }).toList();
 
-    // 2. Apply call/review filter - use _latestCallByLead only (no fallback to callHistory array)
+    // 2. Apply filter
     List<Lead> afterFilter = searchFiltered.where((l) {
-      if (_selectedFilter == 'All') return true;
+      if (_selectedFilter == 'All') {
+        // already guaranteed latest != null above
+        return true;
+      }
 
       if (_selectedFilter == 'Today') {
         final nf = l.nextFollowUp;
@@ -276,32 +284,40 @@ bool _isRejectedCall(LatestCall? latest) {
         return _isSameLocalDay(nf, DateTime.now());
       }
 
-      if (_selectedFilter == 'Needs Review') return l.needsManualReview;
-
       final LatestCall? latest = _latestCallByLead[l.id];
-      // If we require call-specific filters but there's no latest call yet, don't match
-      if (latest == null) return false;
+      if (latest == null) return false; // defensive
 
       final direction = latest.direction?.toLowerCase();
 
-      if (_selectedFilter == 'Answered') return latest.durationInSeconds != null && (latest.durationInSeconds! > 0);
-      if (_selectedFilter == 'Missed') {
-  return _isMissedCall(latest);
-}
+      if (_selectedFilter == 'Answered') {
+        return latest.durationInSeconds != null &&
+            (latest.durationInSeconds! > 0);
+      }
 
-if (_selectedFilter == 'Rejected') {
-  return _isRejectedCall(latest);
-};
+      if (_selectedFilter == 'Missed') {
+        return _isMissedCall(latest);
+      }
+
+      if (_selectedFilter == 'Rejected') {
+        return _isRejectedCall(latest);
+      }
+
       if (_selectedFilter == 'Incoming') return direction == 'inbound';
       if (_selectedFilter == 'Outgoing') return direction == 'outbound';
 
       return false;
     }).toList();
 
-    // Sort by most recent call time (if available) or lead.lastInteraction
+    // 3. Sort strictly by latest call timestamps from /calls
     afterFilter.sort((a, b) {
-      DateTime aTime = (_latestCallByLead[a.id]?.finalizedAt ?? _latestCallByLead[a.id]?.createdAt) ?? a.lastInteraction;
-      DateTime bTime = (_latestCallByLead[b.id]?.finalizedAt ?? _latestCallByLead[b.id]?.createdAt) ?? b.lastInteraction;
+      final la = _latestCallByLead[a.id];
+      final lb = _latestCallByLead[b.id];
+
+      final aTime =
+          (la?.finalizedAt ?? la?.createdAt) ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final bTime =
+          (lb?.finalizedAt ?? lb?.createdAt) ?? DateTime.fromMillisecondsSinceEpoch(0);
+
       return bTime.compareTo(aTime);
     });
 
@@ -318,21 +334,24 @@ if (_selectedFilter == 'Rejected') {
     });
   }
 
-  String? timeAgoShort(DateTime dt) {
-    final diff = DateTime.now().difference(dt);
-    if (diff.inSeconds < 60) return '${diff.inSeconds}s';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
-    if (diff.inHours < 24) return '${diff.inHours}h';
-    return '${diff.inDays}d';
-  }
-
   String _formatHeaderDate(DateTime dt) {
     final now = DateTime.now();
     if (_isSameLocalDay(dt, now)) return 'Today';
     final yesterday = now.subtract(const Duration(days: 1));
     if (_isSameLocalDay(dt, yesterday)) return 'Yesterday';
     final months = [
-      'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec'
     ];
     return '${dt.day} ${months[dt.month - 1]} ${dt.year}';
   }
@@ -340,35 +359,62 @@ if (_selectedFilter == 'Rejected') {
   // Build grouped list: Map<header, List<Lead>>
   List<Widget> _buildGroupedList() {
     if (_filteredLeads.isEmpty) {
-      return [const Center(child: Padding(padding: EdgeInsets.all(16), child: Text("No leads found matching current filters.")))];
+      return [
+        const Center(
+          child: Padding(
+            padding: EdgeInsets.all(16),
+            child: Text("No leads found matching current filters."),
+          ),
+        )
+      ];
     }
 
     final Map<String, List<Lead>> grouped = {};
     final Map<String, DateTime> headerDateForKey = {};
 
     for (var lead in _filteredLeads) {
-      final dt = (_latestCallByLead[lead.id]?.finalizedAt ?? _latestCallByLead[lead.id]?.createdAt) ?? lead.lastInteraction;
+      final latest = _latestCallByLead[lead.id];
+      if (latest == null) continue; // should not happen due to filtering
+
+      final dt =
+          (latest.finalizedAt ?? latest.createdAt) ??
+              DateTime.fromMillisecondsSinceEpoch(0);
+
       final header = _formatHeaderDate(dt);
       grouped.putIfAbsent(header, () => []).add(lead);
-      if (!headerDateForKey.containsKey(header)) headerDateForKey[header] = dt;
-      else {
-        if (dt.isAfter(headerDateForKey[header]!)) headerDateForKey[header] = dt;
+      if (!headerDateForKey.containsKey(header)) {
+        headerDateForKey[header] = dt;
+      } else {
+        if (dt.isAfter(headerDateForKey[header]!)) {
+          headerDateForKey[header] = dt;
+        }
       }
     }
 
-    final headers = grouped.keys.toList()..sort((a,b) => headerDateForKey[b]!.compareTo(headerDateForKey[a]!));
+    final headers = grouped.keys.toList()
+      ..sort((a, b) => headerDateForKey[b]!.compareTo(headerDateForKey[a]!));
 
     final List<Widget> widgets = [];
     for (final header in headers) {
-      widgets.add(Padding(
-        padding: const EdgeInsets.fromLTRB(16,12,16,6),
-        child: Text(header, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87)),
-      ));
+      widgets.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+          child: Text(
+            header,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
+          ),
+        ),
+      );
 
       final leads = grouped[header]!;
       for (var i = 0; i < leads.length; i++) {
         widgets.add(_leadRow(leads[i]));
-        if (i < leads.length - 1) widgets.add(const Divider(height: 1, indent: 72));
+        if (i < leads.length - 1) {
+          widgets.add(const Divider(height: 1, indent: 72));
+        }
       }
     }
 
@@ -378,51 +424,38 @@ if (_selectedFilter == 'Rejected') {
   // -----------------------------------------
   // DIALER / PHONE HELPERS
   // -----------------------------------------
-  // Sanitize phone number to remove spaces/extra chars but keep '+' if present
- // Sanitize phone number and normalize for dialing/WhatsApp.
-// - Keeps a leading '+' if already present.
-// - Removes non-digit chars.
-// - Strips leading zeros.
-// - If number looks like a 10-digit Indian number, prepends +91.
-String _sanitizePhone(String? raw) {
-  if (raw == null) return '';
-  var trimmed = raw.trim();
 
-  // If user provided explicit +, preserve + and digits only
-  if (trimmed.startsWith('+')) {
-    final digits = trimmed.replaceAll(RegExp(r'[^0-9+]'), '');
-    // ensure only a single leading '+'
-    final normalized = '+' + digits.replaceAll('+', '');
-    return normalized;
+  // Sanitize phone number and normalize for dialing/WhatsApp.
+  String _sanitizePhone(String? raw) {
+    if (raw == null) return '';
+    var trimmed = raw.trim();
+
+    if (trimmed.startsWith('+')) {
+      final digits = trimmed.replaceAll(RegExp(r'[^0-9+]'), '');
+      final normalized = '+' + digits.replaceAll('+', '');
+      return normalized;
+    }
+
+    var digitsOnly = trimmed.replaceAll(RegExp(r'[^0-9]'), '');
+
+    while (digitsOnly.startsWith('0')) {
+      digitsOnly = digitsOnly.substring(1);
+    }
+
+    if (digitsOnly.length == 10) {
+      return '+91$digitsOnly';
+    }
+
+    if (digitsOnly.length > 10 && digitsOnly.startsWith('91')) {
+      return '+$digitsOnly';
+    }
+
+    if (digitsOnly.length > 10) {
+      return '+$digitsOnly';
+    }
+
+    return digitsOnly;
   }
-
-  // Remove everything except digits
-  var digitsOnly = trimmed.replaceAll(RegExp(r'[^0-9]'), '');
-
-  // Strip leading zeros (e.g., 0XXXXXXXXXX -> XXXXXXXXXX)
-  while (digitsOnly.startsWith('0')) {
-    digitsOnly = digitsOnly.substring(1);
-  }
-
-  // If exactly 10 digits -> assume India and prepend +91
-  if (digitsOnly.length == 10) {
-    return '+91$digitsOnly';
-  }
-
-  // If starts with country code like 91XXXXXXXX... without +, add +
-  if (digitsOnly.length > 10 && digitsOnly.startsWith('91')) {
-    return '+$digitsOnly';
-  }
-
-  // Fallback: if it already looks like a long international number, prefix +
-  if (digitsOnly.length > 10) {
-    return '+$digitsOnly';
-  }
-
-  // If still short/unknown, return as-is (may be invalid)
-  return digitsOnly;
-}
-
 
   Future<void> _openDialer(String? rawNumber) async {
     print("=== DIALER DEBUG START ===");
@@ -434,7 +467,9 @@ String _sanitizePhone(String? raw) {
     if (number.isEmpty) {
       print("❌ No phone number found.");
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No phone number available for this lead.')),
+        const SnackBar(
+          content: Text('No phone number available for this lead.'),
+        ),
       );
       print("=== DIALER DEBUG END ===");
       return;
@@ -446,7 +481,6 @@ String _sanitizePhone(String? raw) {
     print("Platform: ${defaultTargetPlatform}");
     print("kIsWeb: $kIsWeb");
 
-    // Check canLaunch first
     try {
       final can = await canLaunchUrl(uri);
       print("canLaunchUrl(uri): $can");
@@ -454,7 +488,6 @@ String _sanitizePhone(String? raw) {
       print("❌ canLaunchUrl threw error: $e");
     }
 
-    // Try launchUrl(...)
     try {
       print("Trying launchUrl() with externalApplication...");
       final launched = await launchUrl(
@@ -469,14 +502,16 @@ String _sanitizePhone(String? raw) {
         return;
       }
 
-      // fallback using launchUrlString
-      print("⚠️ launchUrl returned false; trying fallback launchUrlString...");
+      print(
+          "⚠️ launchUrl returned false; trying fallback launchUrlString...");
       final fallback = "tel:$number";
       bool fallbackResult = false;
       try {
-        // on non-web attempt with externalApplication, on web just try string
         if (!kIsWeb) {
-          fallbackResult = await launchUrlString(fallback, mode: LaunchMode.externalApplication);
+          fallbackResult = await launchUrlString(
+            fallback,
+            mode: LaunchMode.externalApplication,
+          );
         } else {
           fallbackResult = await launchUrlString(fallback);
         }
@@ -487,7 +522,9 @@ String _sanitizePhone(String? raw) {
 
       if (!fallbackResult) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open the dialer on this device.')),
+          const SnackBar(
+            content: Text('Could not open the dialer on this device.'),
+          ),
         );
       }
     } catch (e, st) {
@@ -495,7 +532,9 @@ String _sanitizePhone(String? raw) {
       print("Error: $e");
       print("Stacktrace: $st");
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Error while trying to open dialer.')),
+        const SnackBar(
+          content: Text('Error while trying to open dialer.'),
+        ),
       );
     }
 
@@ -503,276 +542,393 @@ String _sanitizePhone(String? raw) {
   }
 
   /// Open WhatsApp chat with the given phone number (uses wa.me).
-/// Ensures number includes +countryCode using _sanitizePhone.
-Future<void> _openWhatsApp(String? rawNumber) async {
-  print("=== WHATSAPP DEBUG START ===");
+  Future<void> _openWhatsApp(String? rawNumber) async {
+    print("=== WHATSAPP DEBUG START ===");
 
-  final normalized = _sanitizePhone(rawNumber);
-  print("Raw WA number: $rawNumber");
-  print("Normalized WA number: $normalized");
+    final normalized = _sanitizePhone(rawNumber);
+    print("Raw WA number: $rawNumber");
+    print("Normalized WA number: $normalized");
 
-  if (normalized.isEmpty) {
-    print("No number to open in WhatsApp.");
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No phone number available")));
+    if (normalized.isEmpty) {
+      print("No number to open in WhatsApp.");
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("No phone number available")),
+      );
+      print("=== WHATSAPP DEBUG END ===");
+      return;
+    }
+
+    final waPathNumber =
+        normalized.startsWith('+') ? normalized.substring(1) : normalized;
+    final waUri = Uri.parse("https://wa.me/$waPathNumber");
+    final webWhatsapp =
+        Uri.parse("https://web.whatsapp.com/send?phone=$waPathNumber");
+
+    print("WhatsApp URI: $waUri");
+    bool opened = false;
+
+    try {
+      opened = await launchUrl(waUri, mode: LaunchMode.externalApplication);
+      print("launchUrl(waUri) result: $opened");
+    } catch (e) {
+      print("launchUrl(waUri) threw: $e");
+    }
+
+    if (!opened) {
+      try {
+        opened = await launchUrl(
+          webWhatsapp,
+          mode: LaunchMode.externalApplication,
+        );
+        print("launchUrl(webWhatsapp) result: $opened");
+      } catch (e) {
+        print("web.whatsapp launch threw: $e");
+        opened = false;
+      }
+    }
+
+    if (!opened) {
+      try {
+        final fallbackString = "https://wa.me/$waPathNumber";
+        final fallbackLaunched = await launchUrlString(
+          fallbackString,
+          mode: LaunchMode.externalApplication,
+        );
+        print("launchUrlString fallback result: $fallbackLaunched");
+        opened = fallbackLaunched;
+      } catch (e) {
+        print("launchUrlString fallback threw: $e");
+      }
+    }
+
+    if (!opened) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Could not open WhatsApp.")),
+      );
+    }
+
     print("=== WHATSAPP DEBUG END ===");
-    return;
   }
-
-  // wa.me wants digits only (no '+')
-  final waPathNumber = normalized.startsWith('+') ? normalized.substring(1) : normalized;
-  final waUri = Uri.parse("https://wa.me/$waPathNumber");
-  final webWhatsapp = Uri.parse("https://web.whatsapp.com/send?phone=$waPathNumber");
-
-  print("WhatsApp URI: $waUri");
-  bool opened = false;
-
-  try {
-    // Try to open via external app (this will open the native WhatsApp if installed)
-    opened = await launchUrl(waUri, mode: LaunchMode.externalApplication);
-    print("launchUrl(waUri) result: $opened");
-  } catch (e) {
-    print("launchUrl(waUri) threw: $e");
-  }
-
-  if (!opened) {
-    // Try fallback to web.whatsapp (may open in browser)
-    try {
-      opened = await launchUrl(webWhatsapp, mode: LaunchMode.externalApplication);
-      print("launchUrl(webWhatsapp) result: $opened");
-    } catch (e) {
-      print("web.whatsapp launch threw: $e");
-      opened = false;
-    }
-  }
-
-  if (!opened) {
-    // Final fallback: try launchUrlString (older API) as a last attempt
-    try {
-      final fallbackString = "https://wa.me/$waPathNumber";
-      final fallbackLaunched = await launchUrlString(fallbackString, mode: LaunchMode.externalApplication);
-      print("launchUrlString fallback result: $fallbackLaunched");
-      opened = fallbackLaunched;
-    } catch (e) {
-      print("launchUrlString fallback threw: $e");
-    }
-  }
-
-  if (!opened) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Could not open WhatsApp.")));
-  }
-
-  print("=== WHATSAPP DEBUG END ===");
-}
-
-
 
   // -----------------------------------------
-  // UI: ANIMATED, GLOSSY LEAD ROW (shows duration + last call time)
+  // UI: ANIMATED, GLOSSY LEAD ROW
   // -----------------------------------------
   Widget _leadRow(Lead lead) {
-  final bool needsReview = lead.needsManualReview;
-  final latest = _latestCallByLead[lead.id];
+    final latest = _latestCallByLead[lead.id];
 
-  // duration & last time from latest call in subcollection
-  String durationLabel = '';
-String lastCallTimeLabel = '';
+    // If somehow no latest (should already be filtered out), skip.
+    if (latest == null) {
+      return const SizedBox.shrink();
+    }
 
-// compute duration as before
-if (latest != null) {
-  if (latest.durationInSeconds != null) {
-    final d = latest.durationInSeconds!;
-    final mins = d ~/ 60;
-    final secs = d % 60;
-    durationLabel = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
-  }
+    // duration & last time from latest call in subcollection
+    String durationLabel = '';
+    String lastCallTimeLabel = '';
 
-  // prefer finalizedAt, fall back to createdAt
-  final dt = latest.finalizedAt ?? latest.createdAt;
-  if (dt != null) {
-    lastCallTimeLabel = _formatTime24(dt);
-  }
-}
+    if (latest.durationInSeconds != null) {
+      final d = latest.durationInSeconds!;
+      final mins = d ~/ 60;
+      final secs = d % 60;
+      durationLabel = mins > 0 ? '${mins}m ${secs}s' : '${secs}s';
+    }
 
-// if there's no latest call, optionally fall back to lead.lastInteraction
-if (lastCallTimeLabel.isEmpty && lead.lastInteraction != null) {
-  lastCallTimeLabel = _formatTime24(lead.lastInteraction);
-}
+    final dt = latest.finalizedAt ?? latest.createdAt;
+    if (dt != null) {
+      lastCallTimeLabel = _formatTime24(dt);
+    }
 
-  final subtitleText = '${lead.phoneNumber}${lead.nextFollowUp != null ? ' • ${lead.nextFollowUp!.day}/${lead.nextFollowUp!.month}' : ''}';
+    final subtitleText =
+        '${lead.phoneNumber}${lead.nextFollowUp != null ? ' • ${lead.nextFollowUp!.day}/${lead.nextFollowUp!.month}' : ''}';
 
-  final isPressed = _pressedLeadId == lead.id;
+    final isPressed = _pressedLeadId == lead.id;
 
-  return GestureDetector(
-    onTapDown: (_) => setState(() => _pressedLeadId = lead.id),
-    onTapCancel: () => setState(() => _pressedLeadId = null),
-    onTapUp: (_) {
-      setState(() => _pressedLeadId = null);
-      Navigator.push(
-        context,
-        PageRouteBuilder(
-          transitionDuration: const Duration(milliseconds: 280),
-          pageBuilder: (_, __, ___) => LeadFormScreen(lead: lead, autoOpenedFromCall: false),
-        ),
-      ).then((_) => _loadLeads());
-    },
-    child: AnimatedContainer(
-      duration: const Duration(milliseconds: 220),
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-      decoration: BoxDecoration(
-        gradient: _cardGradient,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(isPressed ? 0.12 : 0.06),
-            blurRadius: isPressed ? 12 : 8,
-            offset: Offset(0, isPressed ? 6 : 4),
+    // Missed / rejected badges
+    final bool isMissed = _isMissedCall(latest);
+    final bool isRejected = _isRejectedCall(latest);
+
+    Widget? _buildStatusBadge() {
+      if (isMissed) {
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.red.shade50,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: Colors.red.shade200),
           ),
-        ],
-        border: Border.all(color: Colors.black.withOpacity(0.02)),
-      ),
-      transform: Matrix4.identity()..scale(isPressed ? 0.995 : 1.0),
-      child: Row(
-        children: [
-          // direction icon instead of avatar — use only subcollection direction
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(colors: [Colors.white, _primaryColor.withOpacity(0.06)]),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.black.withOpacity(0.04)),
-              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 6, offset: const Offset(0, 3))],
-            ),
-            child: Center(child: _directionIcon(lead)),
-          ),
-
-          const SizedBox(width: 14),
-
-          // Main text
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        lead.name.isEmpty ? 'No name' : lead.name,
-                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: needsReview ? _accentColor : _primaryColor),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                  Text(
-  // now contains HH:mm or empty
-  lastCallTimeLabel.isNotEmpty ? lastCallTimeLabel : '',
-  style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade400),
-),
-
-                  ],
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.phone_missed,
+                  size: 14, color: Colors.red.shade700),
+              const SizedBox(width: 4),
+              Text(
+                'Missed',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.red.shade800,
+                  fontWeight: FontWeight.w700,
                 ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        subtitleText,
-                        style: TextStyle(fontSize: 13, color: Colors.blueGrey.shade400),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    // show duration only (no outcome)
-                    if (durationLabel.isNotEmpty)
-                      Container(
-                        margin: const EdgeInsets.only(left: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade100,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
+              ),
+            ],
+          ),
+        );
+      }
+      if (isRejected) {
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.red.shade50,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: Colors.red.shade200),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.call_end, size: 14, color: Colors.red.shade700),
+              const SizedBox(width: 4),
+              Text(
+                'Rejected',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.red.shade800,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+      return null;
+    }
+
+    final statusBadge = _buildStatusBadge();
+
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressedLeadId = lead.id),
+      onTapCancel: () => setState(() => _pressedLeadId = null),
+      onTapUp: (_) {
+        setState(() => _pressedLeadId = null);
+        Navigator.push(
+          context,
+          PageRouteBuilder(
+            transitionDuration: const Duration(milliseconds: 280),
+            pageBuilder: (_, __, ___) => LeadFormScreen(
+              lead: lead,
+              autoOpenedFromCall: false,
+            ),
+          ),
+        ).then((_) => _loadLeads());
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        decoration: BoxDecoration(
+          gradient: _cardGradient,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(isPressed ? 0.12 : 0.06),
+              blurRadius: isPressed ? 12 : 8,
+              offset: Offset(0, isPressed ? 6 : 4),
+            ),
+          ],
+          border: Border.all(color: Colors.black.withOpacity(0.02)),
+        ),
+        transform: Matrix4.identity()..scale(isPressed ? 0.995 : 1.0),
+        child: Row(
+          children: [
+            // direction icon
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.white, _primaryColor.withOpacity(0.06)],
+                ),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.black.withOpacity(0.04)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.04),
+                    blurRadius: 6,
+                    offset: const Offset(0, 3),
+                  )
+                ],
+              ),
+              child: Center(child: _directionIcon(lead)),
+            ),
+
+            const SizedBox(width: 14),
+
+            // Main text
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
                         child: Text(
-                          durationLabel,
-                          style: TextStyle(fontSize: 11, color: Colors.blueGrey.shade700, fontWeight: FontWeight.w800),
+                          lead.name.isEmpty ? 'No name' : lead.name,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: _primaryColor,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      const SizedBox(width: 8),
+                      // ⏰ Last call time as chip (strictly from /calls)
+                      if (lastCallTimeLabel.isNotEmpty)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.access_time,
+                                size: 12,
+                                color: Colors.blueGrey.shade400,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                lastCallTimeLabel,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.blueGrey.shade600,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          subtitleText,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.blueGrey.shade400,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (durationLabel.isNotEmpty)
+                        Container(
+                          margin: const EdgeInsets.only(left: 8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            durationLabel,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.blueGrey.shade700,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  if (statusBadge != null) ...[
+                    const SizedBox(height: 6),
+                    statusBadge,
                   ],
+                ],
+              ),
+            ),
+
+            const SizedBox(width: 8),
+
+            // Call + WhatsApp (vertical)
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(left: 8, bottom: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.03),
+                        blurRadius: 6,
+                        offset: const Offset(0, 3),
+                      )
+                    ],
+                  ),
+                  child: IconButton(
+                    icon: const Icon(Icons.phone, size: 20),
+                    color: _primaryColor,
+                    padding: const EdgeInsets.all(8),
+                    tooltip:
+                        'Call ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
+                    onPressed: () => _openDialer(lead.phoneNumber),
+                  ),
+                ),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.03),
+                        blurRadius: 6,
+                        offset: const Offset(0, 3),
+                      )
+                    ],
+                  ),
+                  child: IconButton(
+                    iconSize: 20,
+                    padding: const EdgeInsets.all(8),
+                    tooltip:
+                        'WhatsApp ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
+                    icon: Image.network(
+                      'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
+                      width: 20,
+                      height: 20,
+                      errorBuilder: (_, __, ___) =>
+                          const Icon(Icons.message, size: 20),
+                    ),
+                    onPressed: () => _openWhatsApp(lead.phoneNumber),
+                  ),
                 ),
               ],
             ),
-          ),
-
-          const SizedBox(width: 8),
-
-          // ---- CALL + WHATSAPP ICONS: opens dialer and WhatsApp respectively ----
-          // ---- CALL + WHATSAPP ICONS: stacked vertically (one above the other) ----
-Column(
-  mainAxisSize: MainAxisSize.min,
-  children: [
-    // CALL BUTTON (top)
-    Container(
-      margin: const EdgeInsets.only(left: 8, bottom: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
-      ),
-      child: IconButton(
-        icon: const Icon(Icons.phone, size: 20),
-        color: _primaryColor,
-        padding: const EdgeInsets.all(8),
-        tooltip: 'Call ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
-        onPressed: () => _openDialer(lead.phoneNumber),
-      ),
-    ),
-
-    // WHATSAPP BUTTON (bottom)
-    Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
-      ),
-      child: IconButton(
-        iconSize: 20,
-        padding: const EdgeInsets.all(8),
-        tooltip: 'WhatsApp ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
-        icon: Image.network(
-          'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
-          width: 20,
-          height: 20,
-          errorBuilder: (_, __, ___) => const Icon(Icons.message, size: 20),
+          ],
         ),
-        onPressed: () => _openWhatsApp(lead.phoneNumber),
       ),
-    ),
-  ],
-),
-
-        ],
-      ),
-    ),
-  );
-}
-
+    );
+  }
 
   Widget _directionIcon(Lead lead) {
     final latest = _latestCallByLead[lead.id];
     final dir = latest?.direction?.toLowerCase();
-    if (dir == 'inbound') return Icon(Icons.call_received, color: Colors.green.shade700, size: 20);
-    if (dir == 'outbound') return Icon(Icons.call_made, color: _primaryColor, size: 20);
-    return Icon(Icons.person, color: Colors.blueGrey.shade600, size: 20);
-  }
-
-  String _leadTimeLabel(Lead lead) {
-    final latest = _latestCallByLead[lead.id];
-    final dt = (latest?.finalizedAt ?? latest?.createdAt) ?? lead.lastInteraction;
-    final diff = DateTime.now().difference(dt);
-    if (diff.inHours < 24) {
-      if (diff.inMinutes < 60) return '${diff.inMinutes}m';
-      return '${diff.inHours}h';
+    if (dir == 'inbound') {
+      return Icon(Icons.call_received,
+          color: Colors.green.shade700, size: 20);
     }
-    return '${dt.day}/${dt.month}/${dt.year.toString().substring(2)}';
+    if (dir == 'outbound') {
+      return const Icon(Icons.call_made, color: _primaryColor, size: 20);
+    }
+    return Icon(Icons.person,
+        color: Colors.blueGrey.shade600, size: 20);
   }
 
   // -----------------------------------------
@@ -787,48 +943,92 @@ Column(
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(88),
         child: Container(
-          decoration: BoxDecoration(gradient: _appBarGradient, boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10)]),
+          decoration: BoxDecoration(
+            gradient: _appBarGradient,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.08),
+                blurRadius: 10,
+              )
+            ],
+          ),
           child: SafeArea(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
               child: Row(
                 children: [
-                  Expanded(
+                  const Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
-                      children: const [
-                        Text('Leads', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w800)),
+                      children: [
+                        Text(
+                          'Leads',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
                         SizedBox(height: 6),
-                        Text('Recent activity and calls', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                        Text(
+                          'Recent activity and calls',
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 13,
+                          ),
+                        ),
                       ],
                     ),
                   ),
-                  // small gradient rounded search shortcut
                   GestureDetector(
                     onTap: () {
-                      // focus the search field by opening a dialog with the search input
-                      showDialog(context: context, builder: (ctx) {
-                        return AlertDialog(
-                          content: TextField(
-                            controller: _searchCtrl,
-                            autofocus: true,
-                            decoration: const InputDecoration(hintText: 'Search by name or phone'),
-                          ),
-                        );
-                      });
+                      showDialog(
+                        context: context,
+                        builder: (ctx) {
+                          return AlertDialog(
+                            content: TextField(
+                              controller: _searchCtrl,
+                              autofocus: true,
+                              decoration: const InputDecoration(
+                                hintText: 'Search by name or phone',
+                              ),
+                            ),
+                          );
+                        },
+                      );
                     },
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
-                        gradient: LinearGradient(colors: [_accentColor.withOpacity(0.95), _accentColor.withOpacity(0.7)]),
+                        gradient: LinearGradient(
+                          colors: [
+                            _accentColor.withOpacity(0.95),
+                            _accentColor.withOpacity(0.7),
+                          ],
+                        ),
                         borderRadius: BorderRadius.circular(12),
-                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 8, offset: const Offset(0, 3))],
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.12),
+                            blurRadius: 8,
+                            offset: const Offset(0, 3),
+                          )
+                        ],
                       ),
-                      child: Row(
-                        children: const [Icon(Icons.search, color: Colors.black87), SizedBox(width: 8), Text('Search', style: TextStyle(color: Colors.black87))],
+                      child: const Row(
+                        children: [
+                          Icon(Icons.search, color: Colors.black87),
+                          SizedBox(width: 8),
+                          Text(
+                            'Search',
+                            style: TextStyle(color: Colors.black87),
+                          ),
+                        ],
                       ),
                     ),
-                  )
+                  ),
                 ],
               ),
             ),
@@ -836,13 +1036,17 @@ Column(
         ),
       ),
       floatingActionButton: ScaleTransition(
-        scale: Tween(begin: 0.98, end: 1.04).animate(CurvedAnimation(parent: _fabController, curve: Curves.easeInOut)),
+        scale: Tween(begin: 0.98, end: 1.04).animate(
+          CurvedAnimation(
+            parent: _fabController,
+            curve: Curves.easeInOut,
+          ),
+        ),
         child: GestureDetector(
           onTap: () {
             Navigator.push(
               context,
               MaterialPageRoute(
-                // Opens form for a new, empty lead.
                 builder: (_) => LeadFormScreen(
                   lead: Lead.newLead(""),
                   autoOpenedFromCall: false,
@@ -854,11 +1058,24 @@ Column(
             width: 64,
             height: 64,
             decoration: BoxDecoration(
-              gradient: LinearGradient(colors: [_accentColor, _accentColor.withOpacity(0.85)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+              gradient: LinearGradient(
+                colors: [
+                  _accentColor,
+                  _accentColor.withOpacity(0.85),
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
               shape: BoxShape.circle,
-              boxShadow: [BoxShadow(color: _accentColor.withOpacity(0.4), blurRadius: 18, offset: const Offset(0, 10))],
+              boxShadow: [
+                BoxShadow(
+                  color: _accentColor.withOpacity(0.4),
+                  blurRadius: 18,
+                  offset: const Offset(0, 10),
+                )
+              ],
             ),
-            child: Icon(Icons.add, color: _primaryColor, size: 30),
+            child: const Icon(Icons.add, color: _primaryColor, size: 30),
           ),
         ),
       ),
@@ -866,27 +1083,40 @@ Column(
           ? const Center(child: CircularProgressIndicator())
           : Column(
               children: [
-                // TODAY FOLLOWUPS BANNER
                 if (todaysFollowupCount > 0)
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16.0,
+                      vertical: 10,
+                    ),
                     child: InkWell(
                       onTap: _showTodayFollowups,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 12,
+                        ),
                         decoration: BoxDecoration(
                           color: Colors.orange.withOpacity(0.08),
                           borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.orange.withOpacity(0.25)),
+                          border: Border.all(
+                            color: Colors.orange.withOpacity(0.25),
+                          ),
                         ),
                         child: Row(
                           children: [
-                            Icon(Icons.event_available, color: Colors.orange.shade800),
+                            Icon(
+                              Icons.event_available,
+                              color: Colors.orange.shade800,
+                            ),
                             const SizedBox(width: 12),
                             Expanded(
                               child: Text(
-                                'Today\'s follow-ups: $todaysFollowupCount — tap to view',
-                                style: TextStyle(fontWeight: FontWeight.w700, color: Colors.orange.shade900),
+                                "Today's follow-ups: $todaysFollowupCount — tap to view",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.orange.shade900,
+                                ),
                               ),
                             ),
                             TextButton(
@@ -901,11 +1131,13 @@ Column(
 
                 // SEARCH BAR
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16.0),
                   child: TextField(
                     controller: _searchCtrl,
                     decoration: InputDecoration(
-                      prefixIcon: const Icon(Icons.search, color: _primaryColor),
+                      prefixIcon:
+                          const Icon(Icons.search, color: _primaryColor),
                       hintText: "Search by name or phone",
                       filled: true,
                       fillColor: Colors.white,
@@ -915,7 +1147,10 @@ Column(
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(14),
-                        borderSide: const BorderSide(color: _primaryColor, width: 2),
+                        borderSide: const BorderSide(
+                          color: _primaryColor,
+                          width: 2,
+                        ),
                       ),
                     ),
                   ),
@@ -928,7 +1163,8 @@ Column(
                   height: 44,
                   child: ListView.builder(
                     scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16),
                     itemCount: _filters.length,
                     itemBuilder: (_, i) {
                       final filter = _filters[i];
@@ -936,18 +1172,47 @@ Column(
                       return Padding(
                         padding: const EdgeInsets.only(right: 10),
                         child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 260),
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          duration:
+                              const Duration(milliseconds: 260),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10),
                           decoration: BoxDecoration(
-                            color: isSelected ? Colors.white : Colors.white,
+                            color: Colors.white,
                             borderRadius: BorderRadius.circular(20),
                             boxShadow: isSelected
-                                ? [BoxShadow(color: _primaryColor.withOpacity(0.12), blurRadius: 12, offset: const Offset(0, 6))]
-                                : [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 4)],
-                            border: Border.all(color: isSelected ? _primaryColor : Colors.grey.shade200),
+                                ? [
+                                    BoxShadow(
+                                      color: _primaryColor
+                                          .withOpacity(0.12),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 6),
+                                    )
+                                  ]
+                                : [
+                                    BoxShadow(
+                                      color: Colors.black
+                                          .withOpacity(0.02),
+                                      blurRadius: 4,
+                                    )
+                                  ],
+                            border: Border.all(
+                              color: isSelected
+                                  ? _primaryColor
+                                  : Colors.grey.shade200,
+                            ),
                           ),
                           child: ChoiceChip(
-                            label: Text(filter, style: TextStyle(color: isSelected ? _primaryColor : Colors.black87, fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500)),
+                            label: Text(
+                              filter,
+                              style: TextStyle(
+                                color: isSelected
+                                    ? _primaryColor
+                                    : Colors.black87,
+                                fontWeight: isSelected
+                                    ? FontWeight.w700
+                                    : FontWeight.w500,
+                              ),
+                            ),
                             selected: isSelected,
                             onSelected: (_) => _changeFilter(filter),
                             backgroundColor: Colors.transparent,
@@ -961,10 +1226,9 @@ Column(
 
                 const SizedBox(height: 10),
 
-                // LIST - grouped
                 Expanded(
                   child: ListView(
-                    children: _buildGroupedList(),
+                    children: groupedWidgets,
                   ),
                 ),
               ],

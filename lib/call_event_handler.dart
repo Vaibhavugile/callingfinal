@@ -1,6 +1,6 @@
 // lib/call_event_handler.dart
 // Full updated file with MethodChannel to allow MainActivity -> Flutter "open lead" requests
-// and a manual "fix today from Call Log" sync.
+// and manual "fix from Call Log" sync (today / last 7 days / last 30 days).
 
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -120,17 +120,38 @@ class CallEventHandler {
   }
 
   // --------------------------------------------------------------------------
-  // MANUAL "FIX TODAY FROM CALL LOG" BUTTON
+  // MANUAL "FIX FROM CALL LOG" BUTTONS
   // --------------------------------------------------------------------------
+
+  /// Existing behaviour: fix **today** using call log
   Future<void> fixTodayFromCallLog() async {
+    return _fixFromCallLogSince(days: 0, label: "today");
+  }
+
+  /// New: fix **last 7 days** using call log
+  Future<void> fixLast7DaysFromCallLog() async {
+    return _fixFromCallLogSince(days: 7, label: "last 7 days");
+  }
+
+  /// New: fix **last 30 days** (you can treat this as "all recent")
+  Future<void> fixLast30DaysFromCallLog() async {
+    return _fixFromCallLogSince(days: 30, label: "last 30 days");
+  }
+
+  Future<void> _fixFromCallLogSince({
+    required int days,
+    required String label,
+  }) async {
     try {
-      print('📲 Starting today CallLog sync...');
+      print('📲 Starting CallLog sync for $label (days=$days)...');
 
-      // 1) Ask native side for today's rows
-      final List<dynamic> rows =
-          await _nativeChannel.invokeMethod('getTodayCallLog');
+      // Ask native side for rows since N days
+      final List<dynamic> rows = await _nativeChannel.invokeMethod(
+        'getCallLogSinceDays',
+        <String, dynamic>{'days': days},
+      );
 
-      print('📋 Native returned ${rows.length} call-log rows for today.');
+      print('📋 Native returned ${rows.length} call-log rows for $label.');
 
       int total = 0;
       int inbound = 0;
@@ -151,6 +172,9 @@ class CallEventHandler {
         // Normalize direction
         direction = (direction == 'outbound') ? 'outbound' : 'inbound';
 
+        // Normalize outcome
+        final lowerOutcome = outcome.toLowerCase().trim();
+
         // Safe duration: treat missing/negative as 0
         final rawDur = map['durationInSeconds'];
         int duration = 0;
@@ -158,8 +182,7 @@ class CallEventHandler {
           duration = rawDur;
         }
 
-        // 👇 normalize: missed / rejected must be 0 sec
-        final lowerOutcome = outcome.toLowerCase();
+        // For missed / rejected we force duration = 0
         if (lowerOutcome == 'missed' || lowerOutcome == 'rejected') {
           duration = 0;
         }
@@ -182,12 +205,18 @@ class CallEventHandler {
         final ts = DateTime.fromMillisecondsSinceEpoch(tsMs);
 
         try {
-          await _leadService.addFinalCallEvent(
+          // IMPORTANT: PATCH MODE
+          // We only patch the existing call doc in calls subcollection:
+          // - direction
+          // - durationInSeconds
+          // - finalOutcome
+          // We DO NOT create new callHistory items or touch lead fields.
+          await _leadService.updateCallFromCallLog(
             phone: phone,
             direction: direction,
-            outcome: outcome,
             timestamp: ts,
             durationInSeconds: duration,
+            finalOutcome: lowerOutcome,
           );
         } catch (e, st) {
           print('❌ Failed to apply call-log fix for $phone @ $tsMs: $e\n$st');
@@ -195,24 +224,24 @@ class CallEventHandler {
       }
 
       print(
-          '✅ CallLog sync completed. total=$total inbound=$inbound outbound=$outbound withDuration=$withDuration zeroDuration=$zeroDuration');
+          '✅ CallLog sync completed for $label. total=$total inbound=$inbound outbound=$outbound withDuration=$withDuration zeroDuration=$zeroDuration');
 
       // Show a nice summary in UI
       final ctx = navigatorKey.currentState?.overlay?.context;
       if (ctx != null) {
         final msg =
-            "Synced $total calls • $inbound inbound / $outbound outbound • $withDuration with duration, $zeroDuration with 0 sec";
+            "Synced $total calls from $label • $inbound inbound / $outbound outbound • $withDuration with duration, $zeroDuration with 0 sec";
         ScaffoldMessenger.of(ctx).showSnackBar(
           SnackBar(content: Text(msg)),
         );
       }
     } catch (e, st) {
-      print('❌ fixTodayFromCallLog failed: $e\n$st');
+      print('❌ _fixFromCallLogSince($label) failed: $e\n$st');
       final ctx = navigatorKey.currentState?.overlay?.context;
       if (ctx != null) {
         ScaffoldMessenger.of(ctx).showSnackBar(
-          const SnackBar(
-            content: Text("Failed to sync from call log. Check logs."),
+          SnackBar(
+            content: Text("Failed to sync $label from call log. Check logs."),
           ),
         );
       }
