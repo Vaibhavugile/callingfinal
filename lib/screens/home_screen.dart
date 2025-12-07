@@ -5,9 +5,15 @@ import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import '../services/lead_service.dart';
 import '../models/lead.dart';
 import 'lead_list_screen.dart';
+import '../call_event_handler.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final CallEventHandler callHandler;
+
+  const HomeScreen({
+    super.key,
+    required this.callHandler,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -51,14 +57,22 @@ class _HomeScreenState extends State<HomeScreen> {
         width: 150,
         child: Column(
           children: [
-            Text(title,
-                style: TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w600, color: color)),
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: color,
+              ),
+            ),
             const SizedBox(height: 10),
             Text(
               value.toString(),
               style: TextStyle(
-                  fontSize: 28, fontWeight: FontWeight.bold, color: color),
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
             ),
           ],
         ),
@@ -93,6 +107,26 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Future<void> _runFixTodayFromCallLog() async {
+    try {
+      await widget.callHandler.fixTodayFromCallLog();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Synced today's calls from phone log."),
+        ),
+      );
+    } catch (e, st) {
+      FirebaseCrashlytics.instance.recordError(e, st);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Failed to sync from call log. Check logs."),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -112,9 +146,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   children: [
                     _tenantBadge(),
 
-                    const Text("Dashboard",
-                        style: TextStyle(
-                            fontSize: 22, fontWeight: FontWeight.bold)),
+                    const Text(
+                      "Dashboard",
+                      style:
+                          TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                    ),
                     const SizedBox(height: 10),
 
                     Wrap(
@@ -122,25 +158,51 @@ class _HomeScreenState extends State<HomeScreen> {
                       children: [
                         _statCard("Total Leads", _leads.length, Colors.blue),
                         _statCard(
-                            "Follow Up",
-                            _leads.where((e) => e.status == "Follow Up").length,
-                            Colors.orange),
+                          "Follow Up",
+                          _leads
+                              .where((e) => e.status == "Follow Up")
+                              .length,
+                          Colors.orange,
+                        ),
                         _statCard(
-                            "Interested",
-                            _leads.where((e) => e.status == "Interested").length,
-                            Colors.green),
+                          "Interested",
+                          _leads
+                              .where((e) => e.status == "Interested")
+                              .length,
+                          Colors.green,
+                        ),
                       ],
                     ),
 
                     const SizedBox(height: 20),
 
-                    // 🔥🔥🔥 CRASHLYTICS TEST BUTTON (ADDED HERE)
+                    // 🔁 Fix today's calls using Call Log -> Firebase
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.all(16),
+                          backgroundColor: Colors.teal,
+                        ),
+                        icon: const Icon(Icons.sync),
+                        label: const Text(
+                          "Fix today's calls from Call Log",
+                          style: TextStyle(fontSize: 16),
+                        ),
+                        onPressed: _runFixTodayFromCallLog,
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // 🔥 Crashlytics test button (kept)
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
                         style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.all(16),
-                            backgroundColor: Colors.redAccent),
+                          padding: const EdgeInsets.all(16),
+                          backgroundColor: Colors.redAccent,
+                        ),
                         onPressed: () {
                           FirebaseCrashlytics.instance.recordError(
                             Exception("TEST_CRASH_FROM_FLUTTER_BUTTON"),
@@ -148,7 +210,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           );
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
-                                content: Text("Crashlytics test event sent!")),
+                              content:
+                                  Text("Crashlytics test event sent!"),
+                            ),
                           );
                         },
                         child: const Text(
@@ -164,13 +228,15 @@ class _HomeScreenState extends State<HomeScreen> {
                       width: double.infinity,
                       child: ElevatedButton(
                         style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.all(16),
-                            backgroundColor: Colors.blueAccent),
+                          padding: const EdgeInsets.all(16),
+                          backgroundColor: Colors.blueAccent,
+                        ),
                         onPressed: () {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                                builder: (_) => const LeadListScreen()),
+                              builder: (_) => const LeadListScreen(),
+                            ),
                           );
                         },
                         child: const Text(

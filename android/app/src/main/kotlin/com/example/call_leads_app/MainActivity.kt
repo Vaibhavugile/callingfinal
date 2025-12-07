@@ -4,9 +4,11 @@ import android.app.Activity
 import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.CallLog
 import android.util.Log
 import androidx.annotation.NonNull
 import io.flutter.embedding.android.FlutterActivity
@@ -14,6 +16,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import com.google.firebase.crashlytics.FirebaseCrashlytics
+import java.util.Calendar
 
 class MainActivity : FlutterActivity() {
 
@@ -129,6 +132,17 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                // 🔹 NEW: return today's call-log rows to Flutter
+                "getTodayCallLog" -> {
+                    try {
+                        val rows = getTodayCallLogRows()
+                        result.success(rows)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "getTodayCallLog error: ${e.localizedMessage}", e)
+                        result.error("CALLLOG_ERROR", e.localizedMessage, null)
+                    }
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -200,4 +214,153 @@ class MainActivity : FlutterActivity() {
             }
         }
     }
+
+    // --------------------------------------------------------------------
+    // 🔹 NEW HELPERS FOR CALL-LOG → (outcome, direction) + normalization
+    // --------------------------------------------------------------------
+
+    // Decide final outcome + direction from CallLog row
+private fun mapOutcomeAndDirection(callType: Int, duration: Int): Pair<String, String> {
+    return when (callType) {
+        // Incoming:
+        //  - if duration > 0 → answered+ended
+        //  - if duration == 0 → missed
+        CallLog.Calls.INCOMING_TYPE -> {
+            if (duration > 0) {
+                "ended" to "inbound"
+            } else {
+                "missed" to "inbound"
+            }
+        }
+
+        // Outgoing: treat everything as a completed outgoing call,
+        // using duration (0 or >0) as provided by call log.
+        CallLog.Calls.OUTGOING_TYPE -> {
+            "ended" to "outbound"
+        }
+
+        // Explicit missed entries
+        CallLog.Calls.MISSED_TYPE -> {
+            "missed" to "inbound"
+        }
+
+        // Voicemail as inbound
+        CallLog.Calls.VOICEMAIL_TYPE -> {
+            "voicemail" to "inbound"
+        }
+
+        // Many OEMs use 5 for rejected
+        5 -> {
+            "rejected" to "inbound"
+        }
+
+        // Answered on another device
+        CallLog.Calls.ANSWERED_EXTERNALLY_TYPE -> {
+            "answered_external" to "inbound"
+        }
+
+        // Fallback: inbound ended
+        else -> {
+            "ended" to "inbound"
+        }
+    }
+}
+
+
+    private fun normalizeNumber(n: String?): String {
+        if (n == null) return ""
+        val digits = n.filter { it.isDigit() }
+        return digits
+    }
+
+    // --------------------------------------------------------------------
+    // 🔹 NEW: fetch today's call-log rows (used by getTodayCallLog)
+    // --------------------------------------------------------------------
+    private fun getTodayCallLogRows(): List<Map<String, Any?>> {
+    val out = mutableListOf<Map<String, Any?>>()
+
+    // Make sure READ_CALL_LOG is granted
+    if (checkSelfPermission(android.Manifest.permission.READ_CALL_LOG)
+        != PackageManager.PERMISSION_GRANTED
+    ) {
+        Log.w(TAG, "READ_CALL_LOG not granted; returning empty list.")
+        return out
+    }
+
+    val cal = Calendar.getInstance()
+    cal.timeInMillis = System.currentTimeMillis()
+    cal.set(Calendar.HOUR_OF_DAY, 0)
+    cal.set(Calendar.MINUTE, 0)
+    cal.set(Calendar.SECOND, 0)
+    cal.set(Calendar.MILLISECOND, 0)
+    val startOfDayMs = cal.timeInMillis
+
+    val limitUri = CallLog.Calls.CONTENT_URI.buildUpon()
+        .appendQueryParameter("limit", "200") // safety limit
+        .build()
+
+    val projection = arrayOf(
+        CallLog.Calls.NUMBER,
+        CallLog.Calls.TYPE,
+        CallLog.Calls.DATE,
+        CallLog.Calls.DURATION
+    )
+
+    val selection = "${CallLog.Calls.DATE}>=?"
+    val selectionArgs = arrayOf(startOfDayMs.toString())
+
+    val cr = contentResolver
+    val cursor = try {
+        cr.query(
+            limitUri,
+            projection,
+            selection,
+            selectionArgs,
+            "${CallLog.Calls.DATE} DESC"
+        )
+    } catch (e: Exception) {
+        Log.e(TAG, "CallLog query failed: ${e.localizedMessage}", e)
+        null
+    }
+
+    cursor?.use { c ->
+        val idxNumber = c.getColumnIndexOrThrow(CallLog.Calls.NUMBER)
+        val idxType = c.getColumnIndexOrThrow(CallLog.Calls.TYPE)
+        val idxDate = c.getColumnIndexOrThrow(CallLog.Calls.DATE)
+        val idxDur = c.getColumnIndexOrThrow(CallLog.Calls.DURATION)
+
+        while (c.moveToNext()) {
+            try {
+                val rawNumber = c.getString(idxNumber)
+                val type = c.getInt(idxType)
+                val ts = c.getLong(idxDate)
+                val durRaw = c.getInt(idxDur)
+
+                // Always keep duration >= 0
+                val safeDur = if (durRaw >= 0) durRaw else 0
+
+                val (outcome, direction) = mapOutcomeAndDirection(type, safeDur)
+                val normalized = normalizeNumber(rawNumber)
+
+                if (normalized.isEmpty()) continue
+
+                out.add(
+                    mapOf(
+                        "phoneNumber" to normalized,
+                        "direction" to direction,
+                        "outcome" to outcome,
+                        "timestamp" to ts,
+                        "durationInSeconds" to safeDur,  // always present (0+)
+                    )
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Error reading call log row: ${e.localizedMessage}", e)
+            }
+        }
+    }
+
+    Log.d(TAG, "getTodayCallLogRows -> ${out.size} rows")
+    return out
+}
+
 }

@@ -350,16 +350,19 @@ class LeadService {
     required DateTime timestamp,
     int? durationInSeconds,
   }) async {
+    // 1) Ensure we have a lead (deterministic ID, tenant-aware)
     final lead = await findOrCreateLead(
       phone: phone,
       finalOutcome: outcome,
     );
 
+    // 2) Decide if this lead needs manual review
     bool needsReview = lead.needsManualReview;
     if (outcome == 'missed' || outcome == 'rejected') {
       needsReview = true;
     }
 
+    // 3) Build final call history entry
     final entry = CallHistoryEntry(
       direction: direction,
       outcome: outcome,
@@ -367,17 +370,21 @@ class LeadService {
       durationInSeconds: durationInSeconds,
     );
 
+    // 4) Merge into callHistory (dedupe / merge window)
     final hist = [...lead.callHistory];
     final lastIndex = hist.isEmpty ? -1 : hist.length - 1;
 
     if (lastIndex >= 0) {
       final last = hist[lastIndex];
       final dt = (timestamp.difference(last.timestamp)).inMilliseconds.abs();
+
       final merge =
-          (last.outcome == entry.outcome && last.direction == entry.direction && dt < 5000) ||
-              (last.durationInSeconds == null &&
-                  entry.durationInSeconds != null &&
-                  dt < 30000);
+          (last.outcome == entry.outcome &&
+              last.direction == entry.direction &&
+              dt < 5000) ||
+          (last.durationInSeconds == null &&
+              entry.durationInSeconds != null &&
+              dt < 30000);
 
       if (merge) {
         hist[lastIndex] = entry;
@@ -388,6 +395,7 @@ class LeadService {
       hist.add(entry);
     }
 
+    // 5) Update lead doc
     final updated = lead.copyWith(
       callHistory: hist,
       lastCallOutcome: outcome,
@@ -397,7 +405,122 @@ class LeadService {
     );
 
     await _saveLeadToStorage(updated);
+
+    // 6) Also sync into /calls subcollection (best-effort, safe matching)
+    try {
+      await _syncCallsSubcollectionFromFinalEntry(updated, entry);
+    } catch (e, st) {
+      print('❌ _syncCallsSubcollectionFromFinalEntry failed: $e\n$st');
+    }
+
     return updated;
+  }
+
+  // -------------------------------------------------------------------------
+  // Sync final event into /calls subcollection (best-effort, safer matching)
+  // -------------------------------------------------------------------------
+  Future<void> _syncCallsSubcollectionFromFinalEntry(
+    Lead lead,
+    CallHistoryEntry entry,
+  ) async {
+    try {
+      if (lead.id.isEmpty) {
+        print(
+            'ℹ️ _syncCallsSubcollectionFromFinalEntry: lead has no ID, skipping.');
+        return;
+      }
+
+      final tenantId = await _getTenantId();
+
+      // /tenants/{tenantId}/leads/{leadId}/calls
+      final callsRef = _db
+          .collection('tenants')
+          .doc(tenantId)
+          .collection('leads')
+          .doc(lead.id)
+          .collection('calls');
+
+      final DateTime ts = entry.timestamp;
+
+      // 🔍 Look at last few calls for this phone + direction
+      final qSnap = await callsRef
+          .where('phoneNumber', isEqualTo: lead.phoneNumber)
+          .where('direction', isEqualTo: entry.direction)
+          .orderBy('createdAt', descending: true)
+          .limit(5)
+          .get();
+
+      if (qSnap.docs.isEmpty) {
+        print(
+            'ℹ️ No matching call docs for phone=${lead.phoneNumber} dir=${entry.direction}.');
+        return;
+      }
+
+      // Pick the doc whose createdAt is closest to our entry.timestamp
+      DocumentSnapshot<Map<String, dynamic>>? bestDoc;
+      int bestDiffMs = 1 << 30; // big number
+
+      for (final doc in qSnap.docs) {
+        final data = doc.data();
+        final createdAtTs = data['createdAt'] as Timestamp?;
+        if (createdAtTs == null) continue;
+
+        final createdAt = createdAtTs.toDate();
+        final diffMs = createdAt.difference(ts).inMilliseconds.abs();
+
+        if (diffMs < bestDiffMs) {
+          bestDiffMs = diffMs;
+          bestDoc = doc;
+        }
+      }
+
+      if (bestDoc == null) {
+        print(
+            'ℹ️ No call doc had createdAt; skipping reconciliation for phone=${lead.phoneNumber}.');
+        return;
+      }
+
+      // Require "close enough": <= 2 minutes difference
+      const maxDiffMs = 2 * 60 * 1000;
+      if (bestDiffMs > maxDiffMs) {
+        print(
+            'ℹ️ Closest call doc for ${lead.phoneNumber} is too far (${bestDiffMs}ms); skipping.');
+        return;
+      }
+
+      final existing = bestDoc.data() ?? {};
+
+      // If already reconciled with same outcome/duration, skip
+      final alreadyReconciled = (existing['callLogReconciled'] == true) &&
+          (existing['durationInSeconds'] == entry.durationInSeconds) &&
+          (existing['finalOutcome'] == entry.outcome);
+
+      if (alreadyReconciled) {
+        print(
+            'ℹ️ Call doc ${bestDoc.id} already reconciled from call log; skipping update.');
+        return;
+      }
+
+      final Map<String, dynamic> update = {
+        'durationInSeconds': entry.durationInSeconds,
+        'finalOutcome': entry.outcome,
+
+        // 👇 DO NOT TOUCH existing finalizedAt anymore
+
+        // Mark that this row was fixed from call log
+        'callLogReconciled': true,
+        'callLogReconciledAt': FieldValue.serverTimestamp(),
+        'callLogReconciledSource': 'flutter_final_event',
+        'callLogReconciledTimestamp': Timestamp.fromDate(entry.timestamp),
+      };
+
+      await bestDoc.reference.update(update);
+
+      print(
+          '✅ Reconciled /calls/${bestDoc.id} from call log for phone=${lead.phoneNumber}, diffMs=$bestDiffMs');
+    } catch (e, st) {
+      print('❌ _syncCallsSubcollectionFromFinalEntry error: $e\n$st');
+    }
   }
 
   // -------------------------------------------------------------------------

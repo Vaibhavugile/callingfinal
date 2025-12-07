@@ -36,12 +36,10 @@ Future<void> main() async {
   // 2) Setup Crashlytics forwarding for framework errors
   // -------------------------------------------------------------
   FlutterError.onError = (FlutterErrorDetails details) {
-    // Forward Flutter framework errors to Crashlytics
     FirebaseCrashlytics.instance.recordFlutterFatalError(details);
   };
 
   // Optional: send a non-fatal event on startup to test Crashlytics
-  // (Comment this out after verifying Crashlytics is working)
   try {
     FirebaseCrashlytics.instance.recordError(
       Exception("TEST_STARTUP_EVENT_FROM_MAIN.DART"),
@@ -85,7 +83,6 @@ Future<void> main() async {
       try {
         FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
       } catch (e) {
-        // If Crashlytics fails for some reason, still print to console.
         debugPrint('⚠️ Failed to send error to Crashlytics: $e');
         debugPrint('Original error: $error\n$stack');
       }
@@ -116,7 +113,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
         await PermissionsService.ensureAllPermissions(
-            navigatorKey.currentContext ?? context);
+          navigatorKey.currentContext ?? context,
+        );
         debugPrint('🔔 Permissions flow completed.');
 
         final needs = await PermissionsService.needsOemSettings();
@@ -200,7 +198,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(
-                body: Center(child: CircularProgressIndicator()));
+              body: Center(child: CircularProgressIndicator()),
+            );
           }
 
           final user = snapshot.data;
@@ -210,7 +209,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
             return LoginScreen();
           } else {
             debugPrint("🧭 Navigating to HomeScreen (uid=${user.uid})");
-            return HomeScreen();
+            return HomeScreen(callHandler: _callHandler);
           }
         },
       ),
