@@ -419,7 +419,7 @@ class LeadService {
   }
 
   // -------------------------------------------------------------------------
-  // 🔹 NEW: updateCallFromCallLog  (used by "Fix from Call Log" button)
+  // 🔹 updateCallFromCallLog  (used by "Fix from Call Log" button)
   //
   // IMPORTANT:
   //  - DOES NOT create leads.
@@ -431,8 +431,8 @@ class LeadService {
   Future<void> updateCallFromCallLog({
     required String phone,
     required String direction,
-    required DateTime timestamp,
-    required int durationInSeconds,
+    required DateTime timestamp,        // <- call START time from phone log
+    required int durationInSeconds,     // <- duration from call log
     required String finalOutcome,
   }) async {
     try {
@@ -443,6 +443,10 @@ class LeadService {
         print('ℹ️ updateCallFromCallLog: empty normalized phone, skipping');
         return;
       }
+
+      // 🔹 Compute EXPECTED END TIME = start + duration
+      final DateTime expectedEndTime =
+          timestamp.add(Duration(seconds: durationInSeconds));
 
       // 1) Try to find existing lead by phone (cache first)
       Lead? lead = _findInCacheByNormalized(digits);
@@ -498,7 +502,9 @@ class LeadService {
         return;
       }
 
-      final DateTime targetTs = timestamp;
+      // Target = expected END time, not start
+      final DateTime targetTs = expectedEndTime;
+
       DocumentSnapshot<Map<String, dynamic>>? bestDoc;
       int bestDiffMs = 1 << 30;
 
@@ -529,7 +535,7 @@ class LeadService {
         return;
       }
 
-      // Require "close enough": <= 2 minutes
+      // Require "close enough": <= 2 minutes around expected END time
       const maxDiffMs = 2 * 60 * 1000;
       if (bestDiffMs > maxDiffMs) {
         print(
@@ -564,7 +570,8 @@ class LeadService {
         'callLogReconciled': true,
         'callLogReconciledAt': FieldValue.serverTimestamp(),
         'callLogReconciledSource': 'flutter_call_log_fix',
-        'callLogReconciledTimestamp': Timestamp.fromDate(timestamp),
+        // Store the expected END time for debugging clarity
+        'callLogReconciledTimestamp': Timestamp.fromDate(expectedEndTime),
       };
 
       await bestDoc.reference.update(patch);
@@ -667,7 +674,7 @@ class LeadService {
 
         // 👇 DO NOT TOUCH existing finalizedAt anymore
 
-        // Mark that this row was fixed from call log
+        // Mark that this row was fixed from final live event
         'callLogReconciled': true,
         'callLogReconciledAt': FieldValue.serverTimestamp(),
         'callLogReconciledSource': 'flutter_final_event',

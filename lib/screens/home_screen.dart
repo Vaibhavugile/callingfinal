@@ -297,7 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(width: 6),
           Text(
-            hasTenant ? "Tenant: $_tenantId" : "No tenant assigned",
+            hasTenant ? "User: $_tenantId" : "No User assigned",
             style: TextStyle(
               fontSize: 13,
               color: hasTenant ? _accentIndigo : Colors.grey.shade700,
