@@ -50,6 +50,10 @@ class LatestCall {
   final DateTime? finalizedAt;
   final String? finalOutcome;
 
+  // ⭐ NEW: who handled this call
+  final String? handledByUserId;
+  final String? handledByUserName;
+
   LatestCall({
     this.callId,
     this.phoneNumber,
@@ -58,6 +62,8 @@ class LatestCall {
     this.createdAt,
     this.finalizedAt,
     this.finalOutcome,
+    this.handledByUserId,
+    this.handledByUserName,
   });
 
   factory LatestCall.fromDoc(QueryDocumentSnapshot doc) {
@@ -84,6 +90,10 @@ class LatestCall {
       createdAt: _toDate(data['createdAt']),
       finalizedAt: _toDate(data['finalizedAt']),
       finalOutcome: (data['finalOutcome'] as String?)?.toLowerCase(),
+
+      // ⭐ NEW: map user identity from Firestore calls/{callId}
+      handledByUserId: data['handledByUserId'] as String?,
+      handledByUserName: data['handledByUserName'] as String?,
     );
   }
 }
@@ -624,7 +634,7 @@ class _LeadListScreenState extends State<LeadListScreen>
   // ROW UI
   // ---------------------------------------------------------------------------
 
-  Widget _leadRow(Lead lead) {
+    Widget _leadRow(Lead lead) {
     final latest = _latestCallByLead[lead.id];
 
     String durationLabel = '';
@@ -692,6 +702,12 @@ class _LeadListScreenState extends State<LeadListScreen>
       );
     }
 
+    // handler display
+    final String? handlerName =
+        latest?.handledByUserName?.trim().isNotEmpty == true
+            ? latest!.handledByUserName!.trim()
+            : null;
+
     return GestureDetector(
       onTapDown: (_) => setState(() => _pressedLeadId = lead.id),
       onTapCancel: () => setState(() => _pressedLeadId = null),
@@ -752,6 +768,7 @@ class _LeadListScreenState extends State<LeadListScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // top row: name + badge + time
                   Row(
                     children: [
                       Expanded(
@@ -777,12 +794,15 @@ class _LeadListScreenState extends State<LeadListScreen>
                       ),
                     ],
                   ),
+
                   const SizedBox(height: 6),
+
+                  // second row: PHONE (full) + duration
                   Row(
                     children: [
                       Expanded(
                         child: Text(
-                          subtitleText,
+                          subtitleText, // phone + followup
                           style: TextStyle(
                             fontSize: 13,
                             color: Colors.blueGrey.shade400,
@@ -812,6 +832,48 @@ class _LeadListScreenState extends State<LeadListScreen>
                         ),
                     ],
                   ),
+
+                  // third row: handler pill alone (no phone truncation)
+                  if (handlerName != null) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.blueGrey.shade50,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: Colors.blueGrey.shade100,
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.person_outline,
+                                size: 12,
+                                color: Colors.blueGrey.shade500,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                handlerName,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.blueGrey.shade700,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -878,6 +940,7 @@ class _LeadListScreenState extends State<LeadListScreen>
       ),
     );
   }
+
 
   Widget _directionIcon(Lead lead) {
     final latest = _latestCallByLead[lead.id];

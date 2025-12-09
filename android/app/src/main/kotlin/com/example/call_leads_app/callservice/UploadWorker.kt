@@ -216,18 +216,34 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                     val leadRefPath = "tenants/$tenant/leads/$leadId"
                     val callRefPath = "$leadRefPath/calls/$callId"
 
-                    val leadUpsert = mapOf(
+                    val leadUpsert = mutableMapOf<String, Any?>(
                         "phoneNumber" to phone,
                         "lastSeen" to FieldValue.serverTimestamp(),
                         "tenantId" to tenant
                     )
 
-                    val callBase = mapOf(
+                    val callBase = mutableMapOf<String, Any?>(
                         "phoneNumber" to phone,
                         "direction" to direction,
                         "createdAt" to FieldValue.serverTimestamp(),
                         "tenantId" to tenant
                     )
+
+                    // 🔹 NEW: carry user identity from queued item into lead/call/event
+                    val handledByUserId = item["handledByUserId"] as? String
+                    val handledByUserName = item["handledByUserName"] as? String
+
+                    if (!handledByUserId.isNullOrEmpty()) {
+                        // For reports and last-handler on lead
+                        leadUpsert["lastHandledByUserId"] = handledByUserId
+                        // For per-user call reports
+                        callBase["handledByUserId"] = handledByUserId
+                    }
+
+                    if (!handledByUserName.isNullOrEmpty()) {
+                        leadUpsert["lastHandledByUserName"] = handledByUserName
+                        callBase["handledByUserName"] = handledByUserName
+                    }
 
                     val eventData = mutableMapOf<String, Any?>(
                         "outcome" to outcome,
@@ -237,6 +253,12 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                         "tenantId" to tenant
                     )
                     if (duration != null) eventData["durationInSeconds"] = duration
+                    if (!handledByUserId.isNullOrEmpty()) {
+                        eventData["handledByUserId"] = handledByUserId
+                    }
+                    if (!handledByUserName.isNullOrEmpty()) {
+                        eventData["handledByUserName"] = handledByUserName
+                    }
                     if (callIdFromEvent == null) {
                         // if worker generated or selected callId, record that for traceability
                         eventData["callIdGeneratedByWorker"] = true
@@ -247,7 +269,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
 
                     val isFinal = (outcome == "ended" || duration != null)
                     val finalizeFields = if (isFinal) {
-                        val ff = mutableMapOf<String, Any?>( //
+                        val ff = mutableMapOf<String, Any?>(
                             "finalOutcome" to outcome,
                             "finalizedAt" to FieldValue.serverTimestamp()
                         )

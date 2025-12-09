@@ -145,7 +145,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         try {
           await _ensureTenantSyncedForUser(user.uid);
         } catch (e) {
-          debugPrint("⚠️ Tenant sync error: $e");
+          debugPrint("⚠️ Tenant/user sync error: $e");
         }
 
         try {
@@ -217,41 +217,68 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 
   // -------------------------------------------------------------
-  // Sync tenantId to SharedPreferences + Native layer
+  // Sync tenantId + user identity (userId + userName) to
+  // SharedPreferences + Native layer
   // -------------------------------------------------------------
   Future<void> _ensureTenantSyncedForUser(String uid) async {
-    debugPrint("🔍 Checking tenant sync for uid=$uid");
+    debugPrint("🔍 Checking tenant + user sync for uid=$uid");
 
     final prefs = await SharedPreferences.getInstance();
-    final existing = prefs.getString('tenantId');
-
-    if (existing != null && existing.trim().isNotEmpty) {
-      debugPrint("🔁 tenantId already in prefs → $existing");
-      return;
-    }
 
     debugPrint("🌐 Fetching profile from Firestore...");
     final profile = await AuthService().fetchUserProfile(uid);
 
     if (profile == null) {
-      debugPrint("⚠️ No userProfiles/$uid doc found — cannot sync tenant.");
+      debugPrint("⚠️ No userProfiles/$uid doc found — cannot sync tenant/user.");
       return;
     }
 
+    // ---- TENANT ID ----
     final tenant = (profile["tenantId"] as String?)?.trim();
     if (tenant == null || tenant.isEmpty) {
       debugPrint("ℹ️ userProfiles/$uid has NO tenantId.");
-      return;
+    } else {
+      await prefs.setString("tenantId", tenant);
+      debugPrint("✅ Stored tenantId in SharedPreferences → $tenant");
+
+      try {
+        await _nativeChannel.invokeMethod("setTenantId", {"tenantId": tenant});
+        debugPrint("✅ Synced tenantId to native layer → $tenant");
+      } catch (e) {
+        debugPrint("⚠️ Native tenant sync failed: $e");
+      }
     }
 
-    await prefs.setString("tenantId", tenant);
-    debugPrint("✅ Stored tenantId in SharedPreferences → $tenant");
+    // ---- USER ID + DISPLAY NAME ----
+    final firebaseUser = FirebaseAuth.instance.currentUser;
+    final displayNameFromProfile = (profile["displayName"] as String?)?.trim();
+    final displayNameFromAuth = firebaseUser?.displayName?.trim();
+
+    // Always end up with a non-null userName
+    String userName;
+    if (displayNameFromProfile != null && displayNameFromProfile.isNotEmpty) {
+      userName = displayNameFromProfile;
+    } else if (displayNameFromAuth != null && displayNameFromAuth.isNotEmpty) {
+      userName = displayNameFromAuth;
+    } else if (firebaseUser?.email != null &&
+        firebaseUser!.email!.isNotEmpty) {
+      userName = firebaseUser.email!;
+    } else {
+      userName = uid; // ultimate fallback
+    }
+
+    await prefs.setString("userId", uid);
+    await prefs.setString("userName", userName);
+    debugPrint("✅ Stored userId=$uid, userName=$userName in SharedPreferences");
 
     try {
-      await _nativeChannel.invokeMethod("setTenantId", {"tenantId": tenant});
-      debugPrint("✅ Synced tenantId to native layer → $tenant");
+      await _nativeChannel.invokeMethod("setUserIdentity", {
+        "userId": uid,
+        "userName": userName,
+      });
+      debugPrint("✅ Synced user identity to native layer → $uid / $userName");
     } catch (e) {
-      debugPrint("⚠️ Native tenant sync failed: $e");
+      debugPrint("⚠️ Native user identity sync failed: $e");
     }
   }
 }

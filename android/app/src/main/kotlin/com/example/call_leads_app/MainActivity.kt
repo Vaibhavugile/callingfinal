@@ -118,6 +118,37 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                // ⭐ NEW: store userId + userName for per-user call tracking
+                "setUserIdentity" -> {
+                    try {
+                        val userId = call.argument<String>("userId")
+                        val userName = call.argument<String>("userName")
+
+                        if (userId.isNullOrEmpty() && userName.isNullOrEmpty()) {
+                            Log.w(TAG, "setUserIdentity called with empty userId and userName")
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+
+                        val prefs = getSharedPreferences("call_leads_prefs", Context.MODE_PRIVATE)
+                        val editor = prefs.edit()
+                        if (!userId.isNullOrEmpty()) {
+                            editor.putString("userId", userId)
+                        }
+                        if (!userName.isNullOrEmpty()) {
+                            editor.putString("userName", userName)
+                        }
+                        editor.apply()
+
+                        Log.d(TAG, "Native: saved userId=$userId userName=$userName")
+                        result.success(true)
+                    } catch (e: Exception) {
+                        FirebaseCrashlytics.getInstance().recordException(e)
+                        Log.e(TAG, "setUserIdentity error: ${e.localizedMessage}", e)
+                        result.success(false)
+                    }
+                }
+
                 "clearTenantId" -> {
                     try {
                         val prefs = getSharedPreferences("call_leads_prefs", Context.MODE_PRIVATE)

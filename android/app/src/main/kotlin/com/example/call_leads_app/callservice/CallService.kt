@@ -305,13 +305,18 @@ class CallService : Service() {
         return null
     }
 
-    private fun persistAndForwardEvent(payload: Map<String, Any?>) {
+        private fun persistAndForwardEvent(payload: Map<String, Any?>) {
         try {
             FirebaseCrashlytics.getInstance().log("persistAndForwardEvent called for phone=${payload["phoneNumber"]}")
             val mutable = payload.toMutableMap()
 
+            // ----------------------------------------------------
+            // Attach tenant + user identity from SharedPreferences
+            // ----------------------------------------------------
             try {
                 val prefsLocal = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+                // tenantId (business)
                 val tenantId = prefsLocal.getString("tenantId", null)
                 if (!tenantId.isNullOrEmpty()) {
                     mutable["tenantId"] = tenantId
@@ -320,11 +325,30 @@ class CallService : Service() {
                     mutable["needsTenantReview"] = true
                     Log.w(TAG, "No tenantId in prefs – event marked needsTenantReview for phone=${mutable["phoneNumber"]}")
                 }
+
+                // ✅ NEW: user identity (who handled this call)
+                val userId = prefsLocal.getString("userId", null)
+                val userName = prefsLocal.getString("userName", null)
+
+                if (!userId.isNullOrEmpty()) {
+                    mutable["handledByUserId"] = userId
+                }
+                if (!userName.isNullOrEmpty()) {
+                    mutable["handledByUserName"] = userName
+                }
+
+                Log.d(
+                    TAG,
+                    "Attached user identity to event: userId=$userId userName=$userName phone=${mutable["phoneNumber"]}"
+                )
             } catch (e: Exception) {
                 FirebaseCrashlytics.getInstance().recordException(e)
-                Log.w(TAG, "Error while reading tenantId from prefs: ${e.localizedMessage}")
+                Log.w(TAG, "Error while reading tenant/user from prefs: ${e.localizedMessage}")
             }
 
+            // ------------------------------
+            // CallId resolution / markers
+            // ------------------------------
             val phoneRaw = (mutable["phoneNumber"] as? String)
             val normalizedPhone = normalizeNumber(phoneRaw) ?: phoneRaw
 
@@ -338,7 +362,10 @@ class CallService : Service() {
                         if (!existing.isNullOrEmpty()) {
                             callId = existing
                             mutable["callId"] = callId
-                            Log.d(TAG, "Reused existing active/recent callId marker for $normalizedPhone -> $callId (persistAndForwardEvent)")
+                            Log.d(
+                                TAG,
+                                "Reused existing active/recent callId marker for $normalizedPhone -> $callId (persistAndForwardEvent)"
+                            )
                         }
                     }
                 } catch (e: Exception) {
@@ -376,6 +403,9 @@ class CallService : Service() {
                 }
             }
 
+            // ------------------------------
+            // Queue + worker + notification
+            // ------------------------------
             val q = EventQueue(applicationContext)
             q.enqueue(mutable)
             Log.d(TAG, "Persisted event to EventQueue. queueSize=${q.size()} payload=$mutable")
@@ -407,11 +437,15 @@ class CallService : Service() {
                     }
                     "ended", "missed", "rejected" -> {
                         Log.d(TAG, "Updating notification: final outcome $outcome for $phone")
-                        showOrUpdateCallNotification(phone, dir, when (outcome) {
-                            "missed" -> "Missed"
-                            "rejected" -> "Rejected"
-                            else -> "Call ended"
-                        })
+                        showOrUpdateCallNotification(
+                            phone,
+                            dir,
+                            when (outcome) {
+                                "missed" -> "Missed"
+                                "rejected" -> "Rejected"
+                                else -> "Call ended"
+                            }
+                        )
                         mainHandler.postDelayed({ clearCallNotification() }, 1500)
                     }
                 }
@@ -432,6 +466,7 @@ class CallService : Service() {
             }
         }
     }
+
 
     private fun sendToFlutterOrBuffer(payload: Map<String, Any?>) {
         try {
