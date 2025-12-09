@@ -206,8 +206,9 @@ class _HomeScreenState extends State<HomeScreen> {
     required Color color,
     required IconData icon,
     double? width,
+    VoidCallback? onTap,
   }) {
-    return Container(
+    final card = Container(
       width: width,
       decoration: BoxDecoration(
         color: Colors.white,
@@ -272,6 +273,14 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
+
+    if (onTap == null) return card;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: onTap,
+      child: card,
+    );
   }
 
   Widget _tenantBadge() {
@@ -315,7 +324,10 @@ class _HomeScreenState extends State<HomeScreen> {
       MaterialPageRoute(
         builder: (_) => LeadListScreen(initialFilter: filter),
       ),
-    );
+    ).then((_) {
+      // Reload dashboard when coming back from list
+      _loadTenantAndLeads();
+    });
   }
 
   /// Generic runner for call-log sync with nice progress UI
@@ -418,7 +430,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   "Choose which calls you want to sync.",
                   style: TextStyle(
                     fontSize: 13,
-                    color: Colors.grey.shade600,
+                    color: Colors.white,
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -614,7 +626,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                     const SizedBox(height: 10),
 
-                    // 2 cards per row
+                    // 2 cards per row, all clickable
                     LayoutBuilder(
                       builder: (context, constraints) {
                         final cardWidth = (constraints.maxWidth - 12) / 2;
@@ -628,35 +640,31 @@ class _HomeScreenState extends State<HomeScreen> {
                               color: _primaryColor,
                               icon: Icons.people_alt_rounded,
                               width: cardWidth,
+                              onTap: () => _openLeadListWithFilter('All'),
                             ),
                             _statCard(
-                              title: "Follow Up",
+                              title: "Follow Up (Today)",
                               value: followUpCount,
                               color: _accentOrange,
                               icon: Icons.notifications_active_rounded,
                               width: cardWidth,
+                              onTap: () => _openLeadListWithFilter('Today'),
                             ),
-                            // clickable Missed
-                            GestureDetector(
+                            _statCard(
+                              title: "Missed Calls (latest)",
+                              value: missedCount,
+                              color: _accentRed,
+                              icon: Icons.call_missed_rounded,
+                              width: cardWidth,
                               onTap: () => _openLeadListWithFilter('Missed'),
-                              child: _statCard(
-                                title: "Missed Calls (latest)",
-                                value: missedCount,
-                                color: _accentRed,
-                                icon: Icons.call_missed_rounded,
-                                width: cardWidth,
-                              ),
                             ),
-                            // clickable Rejected
-                            GestureDetector(
+                            _statCard(
+                              title: "Rejected Calls (latest)",
+                              value: rejectedCount,
+                              color: _accentRed.withOpacity(0.85),
+                              icon: Icons.call_end_rounded,
+                              width: cardWidth,
                               onTap: () => _openLeadListWithFilter('Rejected'),
-                              child: _statCard(
-                                title: "Rejected Calls (latest)",
-                                value: rejectedCount,
-                                color: _accentRed.withOpacity(0.85),
-                                icon: Icons.call_end_rounded,
-                                width: cardWidth,
-                              ),
                             ),
                           ],
                         );
@@ -723,9 +731,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                 icon: const Icon(Icons.tune_rounded),
                                 label: const Text(
                                   "Choose range & fix",
-                                  style: TextStyle(fontSize: 15),
+                                  style: TextStyle(fontSize: 15,color: Colors.white,),
                                 ),
-                                onPressed: _syncing ? null : _showFixOptionsSheet,
+                                onPressed:
+                                    _syncing ? null : _showFixOptionsSheet,
                               ),
                             ),
                           ],
@@ -736,30 +745,28 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 20),
 
                     SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.all(16),
-                          backgroundColor: _primaryColor,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                        ),
-                        icon: const Icon(Icons.list_alt_rounded),
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => const LeadListScreen(),
-                            ),
-                          );
-                        },
-                        label: const Text(
-                          "View All Leads",
-                          style: TextStyle(fontSize: 18),
-                        ),
-                      ),
-                    ),
+  width: double.infinity,
+  child: ElevatedButton.icon(
+    style: ElevatedButton.styleFrom(
+      padding: const EdgeInsets.all(16),
+      backgroundColor: _primaryColor,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      foregroundColor: Colors.white, // also makes the icon white
+    ),
+    icon: const Icon(Icons.list_alt_rounded),
+    onPressed: () => _openLeadListWithFilter('All'),
+    label: const Text(
+      "View All Leads",
+      style: TextStyle(
+        fontSize: 18,
+        color: Colors.white, // 👈 force white text
+      ),
+    ),
+  ),
+),
+
                   ],
                 ),
               ),
