@@ -7,6 +7,7 @@ import '../services/lead_service.dart';
 import '../models/lead.dart';
 import 'lead_list_screen.dart';
 import '../call_event_handler.dart';
+import '../widgets/gradient_appbar_title.dart';
 
 class HomeScreen extends StatefulWidget {
   final CallEventHandler callHandler;
@@ -85,13 +86,15 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<String, LatestCall?> _latestCallByLead = {};
   bool _loadingLatestCalls = false;
 
-  // Palette
-  final Color _bgColor = const Color(0xFFF3F4F6);
-  final Color _primaryColor = const Color(0xFF111827); // dark text
+  // Dark / Neon Palette
+  final Color _bgDark1 = const Color(0xFF020617);
+  final Color _bgDark2 = const Color(0xFF0B1120);
+  final Color _primaryColor = const Color(0xFF0F172A);
   final Color _accentIndigo = const Color(0xFF6366F1);
-  final Color _accentTeal = const Color(0xFF0D9488);
+  final Color _accentTeal = const Color(0xFF14B8A6);
   final Color _accentOrange = const Color(0xFFF97316);
-  final Color _accentRed = const Color(0xFFDC2626);
+  final Color _accentRed = const Color(0xFFEF4444);
+  final Color _mutedText = const Color(0xFF94A3B8);
 
   @override
   void initState() {
@@ -211,15 +214,23 @@ class _HomeScreenState extends State<HomeScreen> {
     final card = Container(
       width: width,
       decoration: BoxDecoration(
-        color: Colors.white,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            _primaryColor,
+            _bgDark2,
+          ],
+        ),
         borderRadius: BorderRadius.circular(18),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 12,
-            offset: const Offset(0, 6),
+            color: Colors.black.withOpacity(0.45),
+            blurRadius: 18,
+            offset: const Offset(0, 12),
           ),
         ],
+        border: Border.all(color: Colors.white.withOpacity(0.05)),
       ),
       padding: const EdgeInsets.all(14),
       child: Column(
@@ -243,7 +254,7 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               CircleAvatar(
                 radius: 14,
-                backgroundColor: color.withOpacity(0.1),
+                backgroundColor: color.withOpacity(0.12),
                 child: Icon(icon, size: 16, color: color),
               ),
               const SizedBox(width: 8),
@@ -252,10 +263,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: Colors.grey.shade700,
+                    color: Colors.white,
                   ),
                 ),
               ),
@@ -289,10 +300,12 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 14),
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        color: hasTenant ? const Color(0xFFE0ECFF) : Colors.grey.shade100,
+        color: hasTenant
+            ? const Color(0xFF0F172A)
+            : Colors.white.withOpacity(0.02),
         borderRadius: BorderRadius.circular(999),
         border: Border.all(
-          color: hasTenant ? _accentIndigo : Colors.grey.shade400,
+          color: hasTenant ? _accentIndigo : Colors.white24,
           width: 1,
         ),
       ),
@@ -302,14 +315,14 @@ class _HomeScreenState extends State<HomeScreen> {
           Icon(
             Icons.business,
             size: 18,
-            color: hasTenant ? _accentIndigo : Colors.grey.shade600,
+            color: hasTenant ? _accentIndigo : _mutedText,
           ),
           const SizedBox(width: 6),
           Text(
-            hasTenant ? "User: $_tenantId" : "No User assigned",
+            hasTenant ? "User: $_tenantId" : "No user assigned",
             style: TextStyle(
               fontSize: 13,
-              color: hasTenant ? _accentIndigo : Colors.grey.shade700,
+              color: hasTenant ? Colors.white : _mutedText,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -399,6 +412,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     showModalBottomSheet(
       context: context,
+      backgroundColor: _bgDark1,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
@@ -413,7 +427,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   width: 40,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: Colors.grey.shade300,
+                    color: Colors.white24,
                     borderRadius: BorderRadius.circular(999),
                   ),
                 ),
@@ -423,6 +437,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
+                    color: Colors.white,
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -430,7 +445,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   "Choose which calls you want to sync.",
                   style: TextStyle(
                     fontSize: 13,
-                    color: Colors.white,
+                    color: _mutedText,
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -440,6 +455,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.all(14),
                       backgroundColor: _accentTeal,
+                      foregroundColor: Colors.black,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -458,12 +474,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.all(14),
-                      backgroundColor: Colors.white,
-                      foregroundColor: _accentIndigo,
+                      backgroundColor: _bgDark2,
+                      foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                         side: BorderSide(
-                          color: _accentIndigo.withOpacity(0.4),
+                          color: _accentIndigo.withOpacity(0.6),
                         ),
                       ),
                     ),
@@ -481,12 +497,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.all(14),
-                      backgroundColor: Colors.white,
-                      foregroundColor: _accentIndigo,
+                      backgroundColor: _bgDark2,
+                      foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                         side: BorderSide(
-                          color: _accentIndigo.withOpacity(0.4),
+                          color: _accentIndigo.withOpacity(0.6),
                         ),
                       ),
                     ),
@@ -510,42 +526,65 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _syncProgressCard() {
     if (!_syncing) return const SizedBox.shrink();
 
-    return Card(
-      elevation: 4,
+    return Container(
       margin: const EdgeInsets.only(top: 14, bottom: 10),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                const SizedBox(
-                  height: 28,
-                  width: 28,
-                  child: CircularProgressIndicator(strokeWidth: 3),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    _syncLabel.isNotEmpty
-                        ? _syncLabel
-                        : "Syncing from call log...",
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(999),
-              child: const LinearProgressIndicator(minHeight: 3),
-            ),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            _primaryColor,
+            _bgDark2,
           ],
         ),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.45),
+            blurRadius: 18,
+            offset: const Offset(0, 10),
+          ),
+        ],
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
+      ),
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              const SizedBox(
+                height: 28,
+                width: 28,
+                child: CircularProgressIndicator(
+                  strokeWidth: 3,
+                  valueColor:
+                      AlwaysStoppedAnimation<Color>(Colors.lightBlueAccent),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  _syncLabel.isNotEmpty
+                      ? _syncLabel
+                      : "Syncing from call log...",
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: const LinearProgressIndicator(
+              minHeight: 3,
+              valueColor:
+                  AlwaysStoppedAnimation<Color>(Colors.lightBlueAccent),
+              backgroundColor: Colors.white12,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -568,120 +607,147 @@ class _HomeScreenState extends State<HomeScreen> {
     }).length;
 
     return Scaffold(
+      backgroundColor: _bgDark1,
       appBar: AppBar(
-        elevation: 0,
-        title: const Text(
-          "Call Leads CRM",
-          style: TextStyle(
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        foregroundColor: Colors.white,
-        flexibleSpace: Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [
-                _primaryColor,
-                const Color(0xFF1F2937),
-              ],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-        ),
+  elevation: 0,
+  foregroundColor: Colors.white,
+  flexibleSpace: Container(
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        colors: [
+          _bgDark2,
+          _primaryColor,
+        ],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
       ),
-      backgroundColor: _bgColor,
+    ),
+  ),
+  title: const GradientAppBarTitle(
+    "Call Leads CRM",
+    fontSize: 18,
+  ),
+),
+
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _loadTenantAndLeads,
-              child: SingleChildScrollView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _tenantBadge(),
+          : Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    _bgDark1,
+                    _bgDark2,
+                  ],
+                ),
+              ),
+              child: RefreshIndicator(
+                onRefresh: _loadTenantAndLeads,
+                child: SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _tenantBadge(),
 
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          "Dashboard",
-                          style: TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold,
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            "Dashboard",
+                            style: TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
                           ),
-                        ),
-                        Text(
-                          _loadingLatestCalls
-                              ? "Loading call stats..."
-                              : "Total: $totalLeads leads",
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: Colors.grey.shade700,
+                          Text(
+                            _loadingLatestCalls
+                                ? "Loading call stats..."
+                                : "Total: $totalLeads leads",
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: _mutedText,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
 
-                    // 2 cards per row, all clickable
-                    LayoutBuilder(
-                      builder: (context, constraints) {
-                        final cardWidth = (constraints.maxWidth - 12) / 2;
-                        return Wrap(
-                          spacing: 12,
-                          runSpacing: 12,
-                          children: [
-                            _statCard(
-                              title: "Total Leads",
-                              value: totalLeads,
-                              color: _primaryColor,
-                              icon: Icons.people_alt_rounded,
-                              width: cardWidth,
-                              onTap: () => _openLeadListWithFilter('All'),
-                            ),
-                            _statCard(
-                              title: "Follow Up (Today)",
-                              value: followUpCount,
-                              color: _accentOrange,
-                              icon: Icons.notifications_active_rounded,
-                              width: cardWidth,
-                              onTap: () => _openLeadListWithFilter('Today'),
-                            ),
-                            _statCard(
-                              title: "Missed Calls (latest)",
-                              value: missedCount,
-                              color: _accentRed,
-                              icon: Icons.call_missed_rounded,
-                              width: cardWidth,
-                              onTap: () => _openLeadListWithFilter('Missed'),
-                            ),
-                            _statCard(
-                              title: "Rejected Calls (latest)",
-                              value: rejectedCount,
-                              color: _accentRed.withOpacity(0.85),
-                              icon: Icons.call_end_rounded,
-                              width: cardWidth,
-                              onTap: () => _openLeadListWithFilter('Rejected'),
+                      // 2 cards per row, all clickable
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final cardWidth = (constraints.maxWidth - 12) / 2;
+                          return Wrap(
+                            spacing: 12,
+                            runSpacing: 12,
+                            children: [
+                              _statCard(
+                                title: "Total Leads",
+                                value: totalLeads,
+                                color: Colors.cyanAccent,
+                                icon: Icons.people_alt_rounded,
+                                width: cardWidth,
+                                onTap: () => _openLeadListWithFilter('All'),
+                              ),
+                              _statCard(
+                                title: "Follow Up (Today)",
+                                value: followUpCount,
+                                color: _accentOrange,
+                                icon: Icons.notifications_active_rounded,
+                                width: cardWidth,
+                                onTap: () =>
+                                    _openLeadListWithFilter('Today'),
+                              ),
+                              _statCard(
+                                title: "Missed Calls (latest)",
+                                value: missedCount,
+                                color: _accentRed,
+                                icon: Icons.call_missed_rounded,
+                                width: cardWidth,
+                                onTap: () =>
+                                    _openLeadListWithFilter('Missed'),
+                              ),
+                              _statCard(
+                                title: "Rejected Calls (latest)",
+                                value: rejectedCount,
+                                color: _accentRed.withOpacity(0.85),
+                                icon: Icons.call_end_rounded,
+                                width: cardWidth,
+                                onTap: () =>
+                                    _openLeadListWithFilter('Rejected'),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+
+                      _syncProgressCard(),
+
+                      const SizedBox(height: 12),
+
+                      // Fix from CallLog card
+                      Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              _primaryColor,
+                              _bgDark2,
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(18),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.45),
+                              blurRadius: 18,
+                              offset: const Offset(0, 12),
                             ),
                           ],
-                        );
-                      },
-                    ),
-
-                    _syncProgressCard(),
-
-                    const SizedBox(height: 12),
-
-                    // Simple card with one button that opens bottom sheet
-                    Card(
-                      elevation: 3,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      child: Padding(
+                          border:
+                              Border.all(color: Colors.white.withOpacity(0.06)),
+                        ),
                         padding: const EdgeInsets.all(16),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -691,7 +757,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 Container(
                                   padding: const EdgeInsets.all(8),
                                   decoration: BoxDecoration(
-                                    color: _accentIndigo.withOpacity(0.08),
+                                    color: _accentIndigo.withOpacity(0.12),
                                     borderRadius: BorderRadius.circular(12),
                                   ),
                                   child: Icon(
@@ -705,6 +771,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   style: TextStyle(
                                     fontSize: 18,
                                     fontWeight: FontWeight.w600,
+                                    color: Colors.white,
                                   ),
                                 ),
                               ],
@@ -714,7 +781,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               "If some calls were missed or durations are wrong, you can correct them using your phone's call log.",
                               style: TextStyle(
                                 fontSize: 13,
-                                color: Colors.grey.shade700,
+                                color: _mutedText,
                               ),
                             ),
                             const SizedBox(height: 14),
@@ -724,6 +791,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 style: ElevatedButton.styleFrom(
                                   padding: const EdgeInsets.all(14),
                                   backgroundColor: _accentIndigo,
+                                  foregroundColor: Colors.white,
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(12),
                                   ),
@@ -731,7 +799,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                 icon: const Icon(Icons.tune_rounded),
                                 label: const Text(
                                   "Choose range & fix",
-                                  style: TextStyle(fontSize: 15,color: Colors.white,),
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                  ),
                                 ),
                                 onPressed:
                                     _syncing ? null : _showFixOptionsSheet,
@@ -740,34 +810,32 @@ class _HomeScreenState extends State<HomeScreen> {
                           ],
                         ),
                       ),
-                    ),
 
-                    const SizedBox(height: 20),
+                      const SizedBox(height: 20),
 
-                    SizedBox(
-  width: double.infinity,
-  child: ElevatedButton.icon(
-    style: ElevatedButton.styleFrom(
-      padding: const EdgeInsets.all(16),
-      backgroundColor: _primaryColor,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
-      foregroundColor: Colors.white, // also makes the icon white
-    ),
-    icon: const Icon(Icons.list_alt_rounded),
-    onPressed: () => _openLeadListWithFilter('All'),
-    label: const Text(
-      "View All Leads",
-      style: TextStyle(
-        fontSize: 18,
-        color: Colors.white, // 👈 force white text
-      ),
-    ),
-  ),
-),
-
-                  ],
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.all(16),
+                            backgroundColor: Colors.cyanAccent,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            foregroundColor: Colors.black,
+                          ),
+                          icon: const Icon(Icons.list_alt_rounded),
+                          onPressed: () => _openLeadListWithFilter('All'),
+                          label: const Text(
+                            "View All Leads",
+                            style: TextStyle(
+                              fontSize: 18,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

@@ -4,9 +4,35 @@ import 'package:firebase_core/firebase_core.dart';
 
 import '../services/auth_service.dart';
 
+// ----------------------- DARK / NEON THEME CONSTANTS ----------------------
+// These are copied from lead_details_screen.dart and lead_form_screen.dart
+const Color _bgDark1 = Color(0xFF0B1220); // Primary dark background
+const Color _bgDark2 = Color(0xFF020617); // Secondary dark background
+const Color _accentIndigo = Color(0xFF6366F1); // Primary accent (used for buttons)
+const Color _accentCyan = Color(0xFF38BDF8); // Secondary accent (used for highlights)
+
+const Gradient _appBarGradient = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [
+    _bgDark1,
+    _bgDark2,
+  ],
+);
+
+const Gradient _cardGradient = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [
+    Color(0xFF0F172A), // Slightly lighter dark
+    _bgDark2,
+  ],
+);
+// --------------------------------------------------------------------------
+
 /// Premium login / signup screen with improved UI/UX.
 /// Keeps the same behavior as your previous screen (signIn/signUp/reset),
-/// but uses modern visuals: gradient background, glossy form card, animations.
+/// but now ties into the app Theme (primary/secondary colors, background).
 class LoginScreen extends StatefulWidget {
   final VoidCallback? onSignedIn;
 
@@ -16,11 +42,11 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-const Color _primaryColor = Color(0xFF1A237E); // deep indigo
-const Color _accentColor = Color(0xFFE6A600); // gold/amber
-const Color _mutedBg = Color(0xFFF4F6FA);
+// Dark, subtle background for TextFields (no more white boxes).
+const Color _fieldBg = Color(0xFF111827);
 
-class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStateMixin {
+class _LoginScreenState extends State<LoginScreen>
+    with SingleTickerProviderStateMixin {
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _emailCtl = TextEditingController();
   final TextEditingController _passCtl = TextEditingController();
@@ -41,8 +67,14 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   @override
   void initState() {
     super.initState();
-    _animCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 700));
-    _logoScale = CurvedAnimation(parent: _animCtrl, curve: Curves.elasticOut);
+    _animCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 700),
+    );
+    _logoScale = CurvedAnimation(
+      parent: _animCtrl,
+      curve: Curves.elasticOut,
+    );
     _animCtrl.forward();
   }
 
@@ -70,7 +102,8 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
       } catch (_) {}
 
       if (_isSignUpMode) {
-        final tenantProvided = _tenantCtl.text.trim().isNotEmpty ? _tenantCtl.text.trim() : null;
+        final tenantProvided =
+            _tenantCtl.text.trim().isNotEmpty ? _tenantCtl.text.trim() : null;
         try {
           await _auth.signUpWithEmail(
             email: _emailCtl.text.trim(),
@@ -103,7 +136,9 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   String? _validateEmail(String? s) {
     if (s == null || s.trim().isEmpty) return 'Please enter your email';
     final email = s.trim();
-    if (!RegExp(r'^[^@]+@[^@]+\.[^@]+').hasMatch(email)) return 'Invalid email';
+    if (!RegExp(r'^[^@]+@[^@]+\.[^@]+').hasMatch(email)) {
+      return 'Invalid email';
+    }
     return null;
   }
 
@@ -135,31 +170,82 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     }
   }
 
+  InputDecoration _darkFieldDecoration({
+    required String label,
+    required IconData icon,
+    Widget? suffixIcon,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      prefixIcon: Icon(
+        icon,
+        color: Colors.white70,
+      ),
+      suffixIcon: suffixIcon,
+      filled: true,
+      fillColor: _fieldBg,
+      labelStyle: const TextStyle(
+        color: Colors.white70,
+      ),
+      hintStyle: const TextStyle(
+        color: Colors.white54,
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(
+          color: Colors.white24,
+        ),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(
+          color: _accentIndigo,
+          width: 1.4,
+        ),
+      ),
+      errorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(
+          color: Colors.redAccent,
+        ),
+      ),
+      focusedErrorBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(
+          color: Colors.redAccent,
+          width: 1.4,
+        ),
+      ),
+      contentPadding: const EdgeInsets.symmetric(
+        horizontal: 14,
+        vertical: 14,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
     final bool isWide = mq.size.width > 700;
 
+    final theme = Theme.of(context);
+
     return Scaffold(
       body: Container(
         width: double.infinity,
         height: double.infinity,
+        // Match background / gradient with app theme
         decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Color(0xFF0F172A),
-              Color(0xFF1A237E),
-            ],
-          ),
+          // Use the dark theme app bar gradient
+          gradient: _appBarGradient,
         ),
         child: SafeArea(
           child: Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 920),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -180,10 +266,22 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                     Expanded(
                       flex: 6,
                       child: Center(
-                        child: Card(
-                          elevation: 18,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                          color: Colors.white,
+                        // Replaced Card with Container to use the dark gradient
+                        child: Container(
+                          decoration: BoxDecoration(
+                            gradient: _cardGradient,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.06),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.4),
+                                blurRadius: 20,
+                                offset: const Offset(0, 10),
+                              ),
+                            ],
+                          ),
                           child: Padding(
                             padding: const EdgeInsets.all(22.0),
                             child: SingleChildScrollView(
@@ -195,33 +293,58 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                     children: [
                                       Expanded(
                                         child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
                                           children: [
                                             Text(
-                                              _isSignUpMode ? 'Create account' : 'Welcome back',
-                                              style: const TextStyle(
-                                                color: _primaryColor,
+                                              _isSignUpMode
+                                                  ? 'Create account'
+                                                  : 'Welcome back',
+                                              style: theme.textTheme.titleLarge
+                                                  ?.copyWith(
+                                                color: _accentCyan,
                                                 fontSize: 22,
                                                 fontWeight: FontWeight.w800,
                                               ),
                                             ),
                                             const SizedBox(height: 6),
                                             Text(
-                                              _isSignUpMode ? 'Sign up to continue' : 'Sign in to access your leads',
-                                              style: TextStyle(color: Colors.grey.shade600),
+                                              _isSignUpMode
+                                                  ? 'Sign up to continue'
+                                                  : 'Sign in to access your leads',
+                                              style: theme
+                                                  .textTheme.bodyMedium
+                                                  ?.copyWith(
+                                                color: Colors.white70,
+                                              ),
                                             ),
                                           ],
                                         ),
                                       ),
                                       // tiny accent pill
                                       Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                        decoration: BoxDecoration(
-                                          gradient: const LinearGradient(colors: [_accentColor, Color(0xFFF6E27A)]),
-                                          borderRadius: BorderRadius.circular(12),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
                                         ),
-                                        child: Text(_isSignUpMode ? 'New' : 'Sign In',
-                                            style: const TextStyle(fontWeight: FontWeight.w700)),
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [
+                                              _accentIndigo,
+                                              _accentIndigo.withOpacity(0.7),
+                                            ],
+                                          ),
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        child: Text(
+                                          _isSignUpMode ? 'New' : 'Sign In',
+                                          style: theme.textTheme.labelMedium
+                                              ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.black,
+                                          ),
+                                        ),
                                       ),
                                     ],
                                   ),
@@ -230,16 +353,25 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                   if (_error != null)
                                     Container(
                                       width: double.infinity,
-                                      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-                                      margin: const EdgeInsets.only(bottom: 12),
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 10,
+                                        horizontal: 12,
+                                      ),
+                                      margin:
+                                          const EdgeInsets.only(bottom: 12),
                                       decoration: BoxDecoration(
-                                        color: Colors.red.shade50,
+                                        color: Colors.red.shade900
+                                            .withOpacity(0.3),
                                         borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(color: Colors.red.shade100),
+                                        border: Border.all(
+                                          color: Colors.red.shade700,
+                                        ),
                                       ),
                                       child: Text(
                                         _error!,
-                                        style: TextStyle(color: Colors.red.shade700),
+                                        style: TextStyle(
+                                          color: Colors.red.shade200,
+                                        ),
                                       ),
                                     ),
 
@@ -250,15 +382,19 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                         // email
                                         TextFormField(
                                           controller: _emailCtl,
-                                          keyboardType: TextInputType.emailAddress,
-                                          autofillHints: const [AutofillHints.email],
+                                          keyboardType:
+                                              TextInputType.emailAddress,
+                                          autofillHints: const [
+                                            AutofillHints.email
+                                          ],
                                           validator: _validateEmail,
-                                          decoration: InputDecoration(
-                                            labelText: 'Email',
-                                            prefixIcon: const Icon(Icons.email_outlined),
-                                            filled: true,
-                                            fillColor: _mutedBg,
-                                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                          ),
+                                          cursorColor: _accentIndigo,
+                                          decoration: _darkFieldDecoration(
+                                            label: 'Email',
+                                            icon: Icons.email_outlined,
                                           ),
                                         ),
                                         const SizedBox(height: 12),
@@ -268,15 +404,24 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                           controller: _passCtl,
                                           obscureText: _obscurePassword,
                                           validator: _validatePassword,
-                                          decoration: InputDecoration(
-                                            labelText: 'Password',
-                                            prefixIcon: const Icon(Icons.lock_outline),
-                                            filled: true,
-                                            fillColor: _mutedBg,
-                                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                          ),
+                                          cursorColor: _accentIndigo,
+                                          decoration: _darkFieldDecoration(
+                                            label: 'Password',
+                                            icon: Icons.lock_outline,
                                             suffixIcon: IconButton(
-                                              icon: Icon(_obscurePassword ? Icons.visibility_off : Icons.visibility),
-                                              onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                                              icon: Icon(
+                                                _obscurePassword
+                                                    ? Icons.visibility_off
+                                                    : Icons.visibility,
+                                                color: Colors.white70,
+                                              ),
+                                              onPressed: () => setState(
+                                                () => _obscurePassword =
+                                                    !_obscurePassword,
+                                              ),
                                             ),
                                           ),
                                         ),
@@ -284,44 +429,37 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
 
                                         // tenant (only sign up)
                                         AnimatedCrossFade(
-                                          firstChild: const SizedBox.shrink(),
+                                          firstChild:
+                                              const SizedBox.shrink(),
                                           secondChild: Column(
                                             children: [
                                               TextFormField(
                                                 controller: _tenantCtl,
-                                                decoration: InputDecoration(
-                                                  labelText: 'Tenant ID (optional)',
-                                                  prefixIcon: const Icon(Icons.apartment_outlined),
-                                                  filled: true,
-                                                  fillColor: _mutedBg,
-                                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                ),
+                                                cursorColor: _accentIndigo,
+                                                decoration:
+                                                    _darkFieldDecoration(
+                                                  label:
+                                                      'Tenant ID (optional)',
+                                                  icon: Icons
+                                                      .apartment_outlined,
                                                 ),
                                               ),
                                               const SizedBox(height: 12),
                                             ],
                                           ),
-                                          crossFadeState: _isSignUpMode ? CrossFadeState.showSecond : CrossFadeState.showFirst,
-                                          duration: const Duration(milliseconds: 260),
+                                          crossFadeState: _isSignUpMode
+                                              ? CrossFadeState.showSecond
+                                              : CrossFadeState.showFirst,
+                                          duration: const Duration(
+                                            milliseconds: 260,
+                                          ),
                                         ),
 
                                         // remember + forgot row
-                                        Row(
-                                          children: [
-                                            Expanded(
-                                              child: InkWell(
-                                                onTap: () => setState(() => _rememberMe = !_rememberMe),
-                                                child: Row(
-                                                  children: [
-                                                    Checkbox(value: _rememberMe, onChanged: (v) => setState(() => _rememberMe = v ?? false)),
-                                                    const SizedBox(width: 6),
-                                                    Text('Remember me', style: TextStyle(color: Colors.grey.shade700)),
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                           
-                                          ],
-                                        ),
+                                        
 
                                         const SizedBox(height: 12),
 
@@ -330,15 +468,37 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                           width: double.infinity,
                                           height: 52,
                                           child: ElevatedButton(
-                                            onPressed: _loading ? null : _submit,
+                                            onPressed:
+                                                _loading ? null : _submit,
                                             style: ElevatedButton.styleFrom(
-                                              backgroundColor: _primaryColor,
-                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                              backgroundColor: _accentIndigo,
+                                              foregroundColor: Colors.black,
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
                                               elevation: 6,
                                             ),
                                             child: _loading
-                                                ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.2))
-                                                : Text(_isSignUpMode ? 'Sign Up' : 'Sign in', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                                                ? const SizedBox(
+                                                    width: 22,
+                                                    height: 22,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                      color: Colors.black,
+                                                      strokeWidth: 2.2,
+                                                    ),
+                                                  )
+                                                : Text(
+                                                    _isSignUpMode
+                                                        ? 'Sign Up'
+                                                        : 'Sign in',
+                                                    style: const TextStyle(
+                                                      fontSize: 16,
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                    ),
+                                                  ),
                                           ),
                                         ),
 
@@ -346,19 +506,36 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
 
                                         // alternative actions / mode switch
                                         Row(
-                                          mainAxisAlignment: MainAxisAlignment.center,
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
                                           children: [
-                                            Text(_isSignUpMode ? 'Already have an account?' : "Don't have an account?"),
+                                            Text(
+                                              _isSignUpMode
+                                                  ? 'Already have an account?'
+                                                  : "Don't have an account?",
+                                              style: const TextStyle(
+                                                color: Colors.white70,
+                                              ),
+                                            ),
                                             TextButton(
                                               onPressed: _loading
                                                   ? null
                                                   : () {
                                                       setState(() {
-                                                        _isSignUpMode = !_isSignUpMode;
+                                                        _isSignUpMode =
+                                                            !_isSignUpMode;
                                                         _error = null;
                                                       });
                                                     },
-                                              child: Text(_isSignUpMode ? 'Sign in' : 'Sign Up'),
+                                              child: Text(
+                                                _isSignUpMode
+                                                    ? 'Sign in'
+                                                    : 'Sign Up',
+                                                style: const TextStyle(
+                                                  color: _accentCyan,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
                                             ),
                                           ],
                                         ),
@@ -388,6 +565,8 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
 class _BrandPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
     return Padding(
       padding: const EdgeInsets.only(right: 28.0),
       child: Column(
@@ -400,22 +579,44 @@ class _BrandPanel extends StatelessWidget {
             height: 110,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              gradient: const LinearGradient(colors: [Color(0xFFFFE082), Color(0xFFFFC857)]),
-              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 16, offset: Offset(0, 8))],
+              gradient: LinearGradient(
+                colors: [
+                  _accentCyan,
+                  _accentIndigo.withOpacity(0.7),
+                ],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.08),
+                  blurRadius: 16,
+                  offset: const Offset(0, 8),
+                ),
+              ],
             ),
-            child: const Center(
-              child: Icon(Icons.call, size: 48, color: Color(0xFF0F172A)),
+            child: const Icon(
+              Icons.call,
+              size: 48,
+              color: Colors.black,
             ),
           ),
           const SizedBox(height: 20),
-          const Text(
+          Text(
             'Sales assistant\nbuilt for speed',
-            style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w800, height: 1.05),
+            style: theme.textTheme.headlineSmall?.copyWith(
+              color: Colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.w800,
+              height: 1.05,
+            ),
           ),
           const SizedBox(height: 12),
           Text(
-            'Log calls, manage leads, and never miss a follow up. Premium visuals, fast workflows.',
-            style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 14),
+            'Log calls, manage leads, and never miss a follow up. '
+            'Premium visuals, fast workflows.',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: Colors.white.withOpacity(0.9),
+              fontSize: 14,
+            ),
           ),
         ],
       ),

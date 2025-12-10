@@ -9,36 +9,42 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/lead.dart';
 import '../services/lead_service.dart';
 import 'lead_form_screen.dart';
+import '../widgets/gradient_appbar_title.dart';
+// -------------------------------------------------------------------------
+// ✨ Premium dark glass theme (matched to web admin)
+// -------------------------------------------------------------------------
+const Color _bgDark1 = Color(0xFF0B1220); // from web: --bg-1
+const Color _bgDark2 = Color(0xFF061028); // from web: --bg-2
+const Color _primaryColor = Color(0xFF0F172A); // card base
+const Color _accentIndigo = Color(0xFF6C5CE7); // --accent
+const Color _accentCyan = Color(0xFF00D4FF); // --accent2
+const Color _mutedText = Color(0xFF9FB0C4);
+const Color _dangerColor = Color(0xFFFF6B6B);
+const Color _successColor = Color(0xFF00FF9D);
 
-// -------------------------------------------------------------------------
-// ✨ Premium visual theme (gradients, glossy accents, subtle animations)
-// -------------------------------------------------------------------------
-const Color _primaryColor = Color(0xFF0F172A); // deep navy
-const Color _accentColor = Color(0xFFFFC857); // warm gold
-const Color _mutedBg = Color(0xFFF4F6F9);
 const Gradient _appBarGradient = LinearGradient(
   begin: Alignment.topLeft,
   end: Alignment.bottomRight,
-  colors: [Color(0xFF0F172A), Color(0xFF1E2A78)],
+  colors: [
+    _bgDark1,
+    _bgDark2,
+  ],
 );
+
 const Gradient _cardGradient = LinearGradient(
   begin: Alignment.topLeft,
   end: Alignment.bottomRight,
-  colors: [Color(0xFFFFFFFF), Color(0xFFF7FBFF)],
+  colors: [
+    Color(0xFF111827),
+    Color(0xFF020617),
+  ],
 );
 
-class LeadListScreen extends StatefulWidget {
-  /// Optional initial filter ("All", "Incoming", "Outgoing", "Missed", "Rejected", "Today")
-  final String? initialFilter;
-
-  const LeadListScreen({
-    super.key,
-    this.initialFilter,
-  });
-
-  @override
-  State<LeadListScreen> createState() => _LeadListScreenState();
-}
+const BoxShadow _softGlow = BoxShadow(
+  color: Color.fromARGB(180, 2, 6, 23),
+  blurRadius: 28,
+  offset: Offset(0, 18),
+);
 
 // Lightweight model for the latest call (only from /calls subcollection)
 class LatestCall {
@@ -50,8 +56,8 @@ class LatestCall {
   final DateTime? finalizedAt;
   final String? finalOutcome;
 
-  // ⭐ NEW: who handled this call
-  final String? handledByUserId;
+  // you might already have handledByUserName etc added here in your project;
+  // keep your extra fields if you have them.
   final String? handledByUserName;
 
   LatestCall({
@@ -62,7 +68,6 @@ class LatestCall {
     this.createdAt,
     this.finalizedAt,
     this.finalOutcome,
-    this.handledByUserId,
     this.handledByUserName,
   });
 
@@ -90,12 +95,22 @@ class LatestCall {
       createdAt: _toDate(data['createdAt']),
       finalizedAt: _toDate(data['finalizedAt']),
       finalOutcome: (data['finalOutcome'] as String?)?.toLowerCase(),
-
-      // ⭐ NEW: map user identity from Firestore calls/{callId}
-      handledByUserId: data['handledByUserId'] as String?,
-      handledByUserName: data['handledByUserName'] as String?,
+      handledByUserName: (data['handledByUserName'] as String?)?.trim(),
     );
   }
+}
+
+class LeadListScreen extends StatefulWidget {
+  /// Optional initial filter ("All", "Incoming", "Outgoing", "Missed", "Rejected", "Today")
+  final String? initialFilter;
+
+  const LeadListScreen({
+    super.key,
+    this.initialFilter,
+  });
+
+  @override
+  State<LeadListScreen> createState() => _LeadListScreenState();
 }
 
 class _LeadListScreenState extends State<LeadListScreen>
@@ -292,10 +307,10 @@ class _LeadListScreenState extends State<LeadListScreen>
   void _applySearch() {
     final query = _searchCtrl.text.toLowerCase();
 
-    // 1. Text search
+    // 1. Text search — still require that we have a call for this lead
     List<Lead> searchFiltered = _allLeads.where((l) {
       final hasLatest = _latestCallByLead[l.id] != null;
-      if (!hasLatest) return false; // strictly require /calls doc
+      if (!hasLatest) return false;
       return l.name.toLowerCase().contains(query) ||
           l.phoneNumber.contains(query);
     }).toList();
@@ -387,10 +402,24 @@ class _LeadListScreenState extends State<LeadListScreen>
   List<Widget> _buildGroupedList() {
     if (_filteredLeads.isEmpty) {
       return [
-        const Center(
-          child: Padding(
-            padding: EdgeInsets.all(16),
-            child: Text("No leads found matching current filters."),
+        Padding(
+          padding: const EdgeInsets.all(24),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.02),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withOpacity(0.04)),
+            ),
+            child: const Center(
+              child: Text(
+                "No leads found matching current filters.",
+                style: TextStyle(
+                  color: _mutedText,
+                  fontSize: 14,
+                ),
+              ),
+            ),
           ),
         )
       ];
@@ -422,12 +451,13 @@ class _LeadListScreenState extends State<LeadListScreen>
     for (final header in headers) {
       widgets.add(
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
           child: Text(
             header,
             style: const TextStyle(
-              fontWeight: FontWeight.bold,
-              color: Colors.black87,
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+              fontSize: 14,
             ),
           ),
         ),
@@ -437,7 +467,13 @@ class _LeadListScreenState extends State<LeadListScreen>
       for (var i = 0; i < leads.length; i++) {
         widgets.add(_leadRow(leads[i]));
         if (i < leads.length - 1) {
-          widgets.add(const Divider(height: 1, indent: 72));
+          widgets.add(
+            Divider(
+              height: 1,
+              indent: 72,
+              color: Colors.white.withOpacity(0.04),
+            ),
+          );
         }
       }
     }
@@ -634,7 +670,7 @@ class _LeadListScreenState extends State<LeadListScreen>
   // ROW UI
   // ---------------------------------------------------------------------------
 
-    Widget _leadRow(Lead lead) {
+  Widget _leadRow(Lead lead) {
     final latest = _latestCallByLead[lead.id];
 
     String durationLabel = '';
@@ -672,7 +708,7 @@ class _LeadListScreenState extends State<LeadListScreen>
       badge = Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: BoxDecoration(
-          color: Colors.red.shade50,
+          color: _dangerColor.withOpacity(0.08),
           borderRadius: BorderRadius.circular(999),
         ),
         child: Text(
@@ -680,7 +716,7 @@ class _LeadListScreenState extends State<LeadListScreen>
           style: TextStyle(
             fontSize: 10,
             fontWeight: FontWeight.w700,
-            color: Colors.red.shade700,
+            color: _dangerColor.withOpacity(0.9),
           ),
         ),
       );
@@ -688,7 +724,7 @@ class _LeadListScreenState extends State<LeadListScreen>
       badge = Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: BoxDecoration(
-          color: Colors.red.shade50,
+          color: _dangerColor.withOpacity(0.08),
           borderRadius: BorderRadius.circular(999),
         ),
         child: Text(
@@ -696,13 +732,12 @@ class _LeadListScreenState extends State<LeadListScreen>
           style: TextStyle(
             fontSize: 10,
             fontWeight: FontWeight.w700,
-            color: Colors.red.shade700,
+            color: _dangerColor.withOpacity(0.9),
           ),
         ),
       );
     }
 
-    // handler display
     final String? handlerName =
         latest?.handledByUserName?.trim().isNotEmpty == true
             ? latest!.handledByUserName!.trim()
@@ -728,34 +763,44 @@ class _LeadListScreenState extends State<LeadListScreen>
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         decoration: BoxDecoration(
           gradient: _cardGradient,
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(isPressed ? 0.12 : 0.06),
-              blurRadius: isPressed ? 12 : 8,
-              offset: Offset(0, isPressed ? 6 : 4),
+              color:
+                  Colors.black.withOpacity(isPressed ? 0.6 : 0.45), // deep glow
+              blurRadius: isPressed ? 28 : 20,
+              offset: Offset(0, isPressed ? 18 : 14),
             ),
           ],
-          border: Border.all(color: Colors.black.withOpacity(0.02)),
+          border: Border.all(
+            color: Colors.white.withOpacity(0.04),
+          ),
         ),
-        transform: Matrix4.identity()..scale(isPressed ? 0.995 : 1.0),
+        transform: Matrix4.identity()
+          ..scale(isPressed ? 0.992 : 1.0)
+          ..translate(0.0, isPressed ? 1.0 : 0.0),
         child: Row(
           children: [
             // icon
             Container(
-              width: 44,
-              height: 44,
+              width: 48,
+              height: 48,
               decoration: BoxDecoration(
                 gradient: LinearGradient(
-                  colors: [Colors.white, _primaryColor.withOpacity(0.06)],
+                  colors: [
+                    _accentIndigo.withOpacity(0.24),
+                    _accentCyan.withOpacity(0.16),
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.black.withOpacity(0.04)),
-                boxShadow: [
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withOpacity(0.06)),
+                boxShadow: const [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.04),
-                    blurRadius: 6,
-                    offset: const Offset(0, 3),
+                    color: Color.fromARGB(120, 15, 23, 42),
+                    blurRadius: 18,
+                    offset: Offset(0, 10),
                   ),
                 ],
               ),
@@ -774,10 +819,10 @@ class _LeadListScreenState extends State<LeadListScreen>
                       Expanded(
                         child: Text(
                           lead.name.isEmpty ? 'No name' : lead.name,
-                          style: TextStyle(
+                          style: const TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.w700,
-                            color: _primaryColor,
+                            color: Colors.white,
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -789,7 +834,7 @@ class _LeadListScreenState extends State<LeadListScreen>
                         lastCallTimeLabel.isNotEmpty ? lastCallTimeLabel : '',
                         style: TextStyle(
                           fontSize: 12,
-                          color: Colors.blueGrey.shade400,
+                          color: _mutedText.withOpacity(0.9),
                         ),
                       ),
                     ],
@@ -802,10 +847,10 @@ class _LeadListScreenState extends State<LeadListScreen>
                     children: [
                       Expanded(
                         child: Text(
-                          subtitleText, // phone + followup
+                          subtitleText,
                           style: TextStyle(
                             fontSize: 13,
-                            color: Colors.blueGrey.shade400,
+                            color: _mutedText,
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -818,53 +863,53 @@ class _LeadListScreenState extends State<LeadListScreen>
                             vertical: 6,
                           ),
                           decoration: BoxDecoration(
-                            color: Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(12),
+                            color: Colors.white.withOpacity(0.06),
+                            borderRadius: BorderRadius.circular(999),
                           ),
                           child: Text(
                             durationLabel,
-                            style: TextStyle(
+                            style: const TextStyle(
                               fontSize: 11,
-                              color: Colors.blueGrey.shade700,
-                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
                         ),
                     ],
                   ),
 
-                  // third row: handler pill alone (no phone truncation)
+                  // third row: handler pill alone
                   if (handlerName != null) ...[
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 6),
                     Row(
                       children: [
                         Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 4,
+                            horizontal: 10,
+                            vertical: 5,
                           ),
                           decoration: BoxDecoration(
-                            color: Colors.blueGrey.shade50,
                             borderRadius: BorderRadius.circular(999),
                             border: Border.all(
-                              color: Colors.blueGrey.shade100,
+                              color: Colors.white.withOpacity(0.06),
                             ),
+                            color: Colors.white.withOpacity(0.04),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(
                                 Icons.person_outline,
-                                size: 12,
-                                color: Colors.blueGrey.shade500,
+                                size: 13,
+                                color: _mutedText,
                               ),
                               const SizedBox(width: 4),
                               Text(
                                 handlerName,
-                                style: TextStyle(
+                                style: const TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w600,
-                                  color: Colors.blueGrey.shade700,
+                                  color: Colors.white,
                                 ),
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -887,19 +932,19 @@ class _LeadListScreenState extends State<LeadListScreen>
                 Container(
                   margin: const EdgeInsets.only(left: 8, bottom: 8),
                   decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(10),
-                    boxShadow: [
+                    color: Colors.white.withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: const [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.03),
-                        blurRadius: 6,
-                        offset: const Offset(0, 3),
+                        color: Color.fromARGB(100, 15, 23, 42),
+                        blurRadius: 18,
+                        offset: Offset(0, 10),
                       ),
                     ],
                   ),
                   child: IconButton(
                     icon: const Icon(Icons.phone, size: 20),
-                    color: _primaryColor,
+                    color: _successColor.withOpacity(0.9),
                     padding: const EdgeInsets.all(8),
                     tooltip:
                         'Call ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
@@ -908,13 +953,13 @@ class _LeadListScreenState extends State<LeadListScreen>
                 ),
                 Container(
                   decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(10),
-                    boxShadow: [
+                    color: Colors.white.withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: const [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.03),
-                        blurRadius: 6,
-                        offset: const Offset(0, 3),
+                        color: Color.fromARGB(100, 15, 23, 42),
+                        blurRadius: 18,
+                        offset: Offset(0, 10),
                       ),
                     ],
                   ),
@@ -941,17 +986,19 @@ class _LeadListScreenState extends State<LeadListScreen>
     );
   }
 
-
   Widget _directionIcon(Lead lead) {
     final latest = _latestCallByLead[lead.id];
     final dir = latest?.direction?.toLowerCase();
     if (dir == 'inbound') {
-      return Icon(Icons.call_received, color: Colors.green.shade700, size: 20);
+      return Icon(Icons.call_received,
+          color: _successColor.withOpacity(0.9), size: 22);
     }
     if (dir == 'outbound') {
-      return Icon(Icons.call_made, color: _primaryColor, size: 20);
+      return Icon(Icons.call_made,
+          color: _accentIndigo.withOpacity(0.9), size: 22);
     }
-    return Icon(Icons.person, color: Colors.blueGrey.shade600, size: 20);
+    return Icon(Icons.person,
+        color: _mutedText.withOpacity(0.9), size: 20);
   }
 
   // ---------------------------------------------------------------------------
@@ -963,104 +1010,123 @@ class _LeadListScreenState extends State<LeadListScreen>
     final groupedWidgets = _buildGroupedList();
 
     return Scaffold(
-      backgroundColor: _mutedBg,
+      backgroundColor: _bgDark1,
       appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(88),
-        child: Container(
-          decoration: BoxDecoration(
-            gradient: _appBarGradient,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.08),
-                blurRadius: 10,
-              ),
-            ],
-          ),
-          child: SafeArea(
-            child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Leads',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        SizedBox(height: 6),
-                        Text(
-                          'Recent activity and calls',
-                          style: TextStyle(
-                            color: Colors.white70,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
-                    ),
+  preferredSize: const Size.fromHeight(88),
+  child: Container(
+    decoration: BoxDecoration(
+      gradient: _appBarGradient,
+      boxShadow: const [
+        BoxShadow(
+          color: Color.fromARGB(220, 3, 7, 18),
+          blurRadius: 26,
+          offset: Offset(0, 16),
+        ),
+      ],
+    ),
+    child: SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  // ✅ gradient text like admin navbar
+                  GradientAppBarTitle(
+                    'Leads',
+                    fontSize: 20,
                   ),
-                  GestureDetector(
-                    onTap: () {
-                      showDialog(
-                        context: context,
-                        builder: (ctx) {
-                          return AlertDialog(
-                            content: TextField(
-                              controller: _searchCtrl,
-                              autofocus: true,
-                              decoration: const InputDecoration(
-                                hintText: 'Search by name or phone',
-                              ),
-                            ),
-                          );
-                        },
-                      );
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 8,
-                      ),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [
-                            _accentColor.withOpacity(0.95),
-                            _accentColor.withOpacity(0.7),
-                          ],
-                        ),
-                        borderRadius: BorderRadius.circular(12),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.12),
-                            blurRadius: 8,
-                            offset: const Offset(0, 3),
-                          ),
-                        ],
-                      ),
-                      child: const Row(
-                        children: [
-                          Icon(Icons.search, color: Colors.black87),
-                          SizedBox(width: 8),
-                          Text(
-                            'Search',
-                            style: TextStyle(color: Colors.black87),
-                          ),
-                        ],
-                      ),
+                  SizedBox(height: 6),
+                  Text(
+                    'Recent activity and calls',
+                    style: TextStyle(
+                      color: _mutedText,
+                      fontSize: 13,
                     ),
                   ),
                 ],
               ),
             ),
-          ),
+            GestureDetector(
+              onTap: () {
+                showDialog(
+                  context: context,
+                  builder: (ctx) {
+                    return AlertDialog(
+                      backgroundColor: _primaryColor,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      content: TextField(
+                        controller: _searchCtrl,
+                        autofocus: true,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          hintText: 'Search by name or phone',
+                          hintStyle:
+                              TextStyle(color: _mutedText, fontSize: 14),
+                          enabledBorder: UnderlineInputBorder(
+                            borderSide: BorderSide(color: _mutedText),
+                          ),
+                          focusedBorder: UnderlineInputBorder(
+                            borderSide:
+                                BorderSide(color: _accentCyan, width: 1.4),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 9,
+                ),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      _accentIndigo,
+                      _accentCyan,
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(999),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color.fromARGB(180, 12, 24, 80),
+                      blurRadius: 18,
+                      offset: Offset(0, 10),
+                    ),
+                  ],
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.search,
+                        color: Colors.black87, size: 18),
+                    SizedBox(width: 8),
+                    Text(
+                      'Search',
+                      style: TextStyle(
+                        color: Colors.black87,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
+    ),
+  ),
+),
+
       floatingActionButton: ScaleTransition(
         scale: Tween(begin: 0.98, end: 1.04).animate(
           CurvedAnimation(
@@ -1086,18 +1152,18 @@ class _LeadListScreenState extends State<LeadListScreen>
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 colors: [
-                  _accentColor,
-                  _accentColor.withOpacity(0.85),
+                  const Color(0xFFFFC857),
+                  const Color(0xFFFFC857).withOpacity(0.9),
                 ],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
               shape: BoxShape.circle,
-              boxShadow: [
+              boxShadow: const [
                 BoxShadow(
-                  color: _accentColor.withOpacity(0.4),
-                  blurRadius: 18,
-                  offset: const Offset(0, 10),
+                  color: Color.fromARGB(200, 255, 200, 80),
+                  blurRadius: 26,
+                  offset: Offset(0, 14),
                 ),
               ],
             ),
@@ -1105,166 +1171,210 @@ class _LeadListScreenState extends State<LeadListScreen>
           ),
         ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                if (todaysFollowupCount > 0)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16.0,
-                      vertical: 10,
-                    ),
-                    child: InkWell(
-                      onTap: _showTodayFollowups,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 12,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withOpacity(0.08),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: Colors.orange.withOpacity(0.25),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.event_available,
-                              color: Colors.orange.shade800,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                'Today\'s follow-ups: $todaysFollowupCount — tap to view',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  color: Colors.orange.shade900,
-                                ),
-                              ),
-                            ),
-                            TextButton(
-                              onPressed: _showTodayFollowups,
-                              child: const Text('VIEW'),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-
-                // SEARCH BAR
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16.0),
-                  child: TextField(
-                    controller: _searchCtrl,
-                    decoration: InputDecoration(
-                      prefixIcon: const Icon(Icons.search, color: _primaryColor),
-                      hintText: "Search by name or phone",
-                      filled: true,
-                      fillColor: Colors.white,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide: BorderSide.none,
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide: const BorderSide(
-                          color: _primaryColor,
-                          width: 2,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 12),
-
-                // FILTER CHIPS
-                SizedBox(
-                  height: 44,
-                  child: ListView.builder(
-                    scrollDirection: Axis.horizontal,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: _filters.length,
-                    itemBuilder: (_, i) {
-                      final filter = _filters[i];
-                      final isSelected = _selectedFilter == filter;
-                      return Padding(
-                        padding: const EdgeInsets.only(right: 10),
-                        child: AnimatedContainer(
-                          duration:
-                              const Duration(milliseconds: 260),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              _bgDark1,
+              _bgDark2,
+            ],
+          ),
+        ),
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : Column(
+                children: [
+                  if (todaysFollowupCount > 0)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16.0, vertical: 10),
+                      child: InkWell(
+                        onTap: _showTodayFollowups,
+                        borderRadius: BorderRadius.circular(16),
+                        child: Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
+                            horizontal: 12,
+                            vertical: 12,
                           ),
                           decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                            boxShadow: isSelected
-                                ? [
-                                    BoxShadow(
-                                      color: _primaryColor
-                                          .withOpacity(0.12),
-                                      blurRadius: 12,
-                                      offset: const Offset(0, 6),
-                                    )
-                                  ]
-                                : [
-                                    BoxShadow(
-                                      color: Colors.black
-                                          .withOpacity(0.02),
-                                      blurRadius: 4,
-                                    )
-                                  ],
+                            gradient: LinearGradient(
+                              colors: [
+                                Colors.orange.withOpacity(0.20),
+                                Colors.orange.withOpacity(0.08),
+                              ],
+                            ),
+                            borderRadius: BorderRadius.circular(16),
                             border: Border.all(
-                              color: isSelected
-                                  ? _primaryColor
-                                  : Colors.grey.shade200,
+                              color: Colors.orange.withOpacity(0.45),
                             ),
                           ),
-                          child: ChoiceChip(
-                            label: Text(
-                              filter,
-                              style: TextStyle(
-                                color: isSelected
-                                    ? _primaryColor
-                                    : Colors.black87,
-                                fontWeight: isSelected
-                                    ? FontWeight.w700
-                                    : FontWeight.w500,
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.event_available,
+                                color: Colors.orange.shade200,
                               ),
-                            ),
-                            selected: isSelected,
-                            onSelected: (_) => _changeFilter(filter),
-                            backgroundColor: Colors.transparent,
-                            selectedColor: Colors.transparent,
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  'Today\'s follow-ups: $todaysFollowupCount — tap to view',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.orange.shade50,
+                                  ),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: _showTodayFollowups,
+                                child: const Text(
+                                  'VIEW',
+                                  style: TextStyle(color: Colors.white),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      );
-                    },
-                  ),
-                ),
+                      ),
+                    ),
 
-                const SizedBox(height: 10),
-
-                // LIST with pull-to-refresh
-                Expanded(
-                  child: RefreshIndicator(
-                    onRefresh: _loadLeads,
-                    child: ListView(
-                      physics:
-                          const AlwaysScrollableScrollPhysics(),
-                      children: groupedWidgets,
+                  // SEARCH BAR
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: TextField(
+                      controller: _searchCtrl,
+                      style: const TextStyle(color: Colors.white),
+                      cursorColor: _accentCyan,
+                      decoration: InputDecoration(
+                        prefixIcon:
+                            const Icon(Icons.search, color: Colors.white70),
+                        hintText: "Search by name or phone",
+                        hintStyle: const TextStyle(
+                            color: _mutedText, fontSize: 14),
+                        filled: true,
+                        fillColor: const Color(0xFF0F172A),
+                        contentPadding: const EdgeInsets.symmetric(
+                            vertical: 12, horizontal: 12),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          borderSide: BorderSide(
+                            color: Colors.white.withOpacity(0.04),
+                          ),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          borderSide: BorderSide(
+                            color: Colors.white.withOpacity(0.04),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          borderSide: const BorderSide(
+                            color: _accentCyan,
+                            width: 1.6,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ],
+
+                  const SizedBox(height: 12),
+
+                  // FILTER CHIPS
+                  // FILTER CHIPS
+SizedBox(
+  height: 48,
+  child: ListView.separated(
+    scrollDirection: Axis.horizontal,
+    padding: const EdgeInsets.symmetric(horizontal: 16),
+    itemCount: _filters.length,
+    separatorBuilder: (_, __) => const SizedBox(width: 10),
+    itemBuilder: (_, i) {
+      final filter = _filters[i];
+      final bool isSelected = _selectedFilter == filter;
+
+      return GestureDetector(
+        onTap: () => _changeFilter(filter), // 🔹 same logic
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(
+            horizontal: 18,
+            vertical: 8,
+          ),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            gradient: isSelected
+                ? const LinearGradient(
+                    colors: [
+                      _accentIndigo,
+                      _accentCyan,
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  )
+                : null,
+            color: isSelected
+                ? null
+                : const Color(0xFF0F172A), // dark pill for unselected
+            border: Border.all(
+              color: isSelected
+                  ? Colors.white.withOpacity(0.85)
+                  : Colors.white.withOpacity(0.14),
             ),
+            boxShadow: isSelected
+                ? const [
+                    BoxShadow(
+                      color: Color.fromARGB(140, 37, 99, 235),
+                      blurRadius: 16,
+                      offset: Offset(0, 8),
+                    ),
+                  ]
+                : [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.45),
+                      blurRadius: 10,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+          ),
+          child: Center(
+            child: Text(
+              filter,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight:
+                    isSelected ? FontWeight.w700 : FontWeight.w500,
+                color: isSelected ? Colors.black : Colors.white,
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+  ),
+),
+
+
+                  const SizedBox(height: 10),
+
+                  // LIST with pull-to-refresh
+                  Expanded(
+                    child: RefreshIndicator(
+                      color: _accentCyan,
+                      backgroundColor: _primaryColor,
+                      onRefresh: _loadLeads,
+                      child: ListView(
+                        physics:
+                            const AlwaysScrollableScrollPhysics(),
+                        children: groupedWidgets,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+      ),
     );
   }
 }

@@ -1,23 +1,94 @@
-// lib/screens/lead_details_screen.dart
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../models/lead.dart';
-import '../services/lead_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
-import 'package:flutter/foundation.dart'; // for kIsWeb if not already imported
+import 'package:flutter/foundation.dart';
 
-// -----------------------------------------------------------------------------
-// Premium Theme
-// -----------------------------------------------------------------------------
-const Color _primaryColor = Color(0xFF0F172A); // deep navy
-const Color _accentColor = Color(0xFFFFC857); // warm gold
+import '../models/lead.dart';
+import '../widgets/gradient_appbar_title.dart';
+
+// ----------------------- THEME (matches LeadListScreen) -----------------------
+
+const Color _bgDark1 = Color(0xFF0B1220);
+const Color _bgDark2 = Color(0xFF020617);
+const Color _primaryColor = Color(0xFF020617);
+const Color _accentIndigo = Color(0xFF6366F1);
+const Color _accentCyan = Color(0xFF38BDF8);
+const Color _mutedText = Color(0xFF9FB0C4);
+
+const Gradient _appBarGradient = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [
+    _bgDark1,
+    _bgDark2,
+  ],
+);
+
 const Gradient _cardGradient = LinearGradient(
   begin: Alignment.topLeft,
   end: Alignment.bottomRight,
-  colors: [Color(0xFFFFFFFF), Color(0xFFF7FBFF)],
+  colors: [
+    Color(0xFF0F172A),
+    Color(0xFF020617),
+  ],
 );
+
+// ----------------------------- Call model -------------------------------------
+
+class LeadCall {
+  final String id;
+  final String? direction;
+  final int? durationInSeconds;
+  final DateTime? createdAt;
+  final DateTime? finalizedAt;
+  final String? finalOutcome;
+  final String? phoneNumber;
+  final String? handledByUserName;
+
+  LeadCall({
+    required this.id,
+    this.direction,
+    this.durationInSeconds,
+    this.createdAt,
+    this.finalizedAt,
+    this.finalOutcome,
+    this.phoneNumber,
+    this.handledByUserName,
+  });
+
+  factory LeadCall.fromDoc(QueryDocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>;
+
+    DateTime? _toDate(Object? v) {
+      if (v == null) return null;
+      if (v is Timestamp) return v.toDate();
+      if (v is DateTime) return v;
+      try {
+        return DateTime.parse(v.toString());
+      } catch (_) {
+        return null;
+      }
+    }
+
+    return LeadCall(
+      id: doc.id,
+      direction: (data['direction'] as String?)?.toLowerCase(),
+      durationInSeconds: data['durationInSeconds'] is num
+          ? (data['durationInSeconds'] as num).toInt()
+          : null,
+      createdAt: _toDate(data['createdAt']),
+      finalizedAt: _toDate(data['finalizedAt']),
+      finalOutcome: (data['finalOutcome'] as String?)?.toLowerCase() ??
+          (data['outcome'] as String?)?.toLowerCase(),
+      phoneNumber: data['phoneNumber'] as String?,
+      handledByUserName: (data['handledByUserName'] as String?)?.trim(),
+    );
+  }
+}
+
+// ------------------------- Screen widget --------------------------------------
 
 class LeadDetailsScreen extends StatefulWidget {
   final Lead lead;
@@ -31,836 +102,955 @@ class LeadDetailsScreen extends StatefulWidget {
   State<LeadDetailsScreen> createState() => _LeadDetailsScreenState();
 }
 
-class LatestCall {
-  final String id;
-  final String? direction;
-  final int? durationInSeconds;
-  final DateTime? createdAt;
-  final DateTime? finalizedAt;
+class _LeadDetailsScreenState extends State<LeadDetailsScreen> {
+  bool _loadingCalls = true;
+  List<LeadCall> _calls = [];
+  String? _loadError;
 
-  LatestCall({
-    required this.id,
-    this.direction,
-    this.durationInSeconds,
-    this.createdAt,
-    this.finalizedAt,
-  });
+  // --------- controllers for the details form (phone, name, etc.) -------------
 
-  factory LatestCall.fromDoc(QueryDocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
-
-    DateTime? _toDate(Object? v) {
-      if (v == null) return null;
-      if (v is Timestamp) return v.toDate();
-      if (v is DateTime) return v;
-      try {
-        return DateTime.parse(v.toString());
-      } catch (_) {
-        final maybeInt = int.tryParse(v.toString());
-        if (maybeInt != null) return DateTime.fromMillisecondsSinceEpoch(maybeInt);
-        return null;
-      }
-    }
-
-    return LatestCall(
-      id: doc.id,
-      direction: (data['direction'] as String?)?.toLowerCase(),
-      durationInSeconds: data['durationInSeconds'] is num ? (data['durationInSeconds'] as num).toInt() : null,
-      createdAt: _toDate(data['createdAt']),
-      finalizedAt: _toDate(data['finalizedAt']),
-    );
-  }
-}
-
-class _LeadDetailsScreenState extends State<LeadDetailsScreen> with TickerProviderStateMixin {
-  final LeadService _service = LeadService.instance;
-
-  late Lead _lead;
-
-  // Controllers
   late TextEditingController _phoneController;
   late TextEditingController _nameController;
-  late TextEditingController _noteController;
-
-  // NEW controllers for editable fields
   late TextEditingController _addressController;
   late TextEditingController _requirementsController;
-  DateTime? _nextFollowUp;
-  DateTime? _eventDate;
-
-  bool _saving = false;
-
-  final List<String> _statusOptions = [
-    "new",
-    "in progress",
-    "follow up",
-    "interested",
-    "not interested",
-    "closed",
-  ];
-
-  // Latest up to 5 calls for this lead
-  List<LatestCall> _latestCalls = [];
-  bool _loadingLatestCalls = false;
-
-  // small animation controller for subtle UI motion
-  late final AnimationController _pulseController;
+  String _status = 'new';
 
   @override
   void initState() {
     super.initState();
-    _lead = widget.lead;
-
-    _phoneController = TextEditingController(text: _lead.phoneNumber);
-    _nameController = TextEditingController(text: _lead.name);
-    _noteController = TextEditingController();
-
-    _addressController = TextEditingController(text: _lead.address ?? '');
-    _requirementsController = TextEditingController(text: _lead.requirements ?? '');
-    _nextFollowUp = _lead.nextFollowUp;
-    _eventDate = _lead.eventDate;
-
-    _pulseController = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat(reverse: true);
-
-    _loadLatestCalls();
-  }
-
-  @override
-  void didUpdateWidget(covariant LeadDetailsScreen oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.lead.id != oldWidget.lead.id) {
-      setState(() {
-        _lead = widget.lead;
-        _phoneController.text = _lead.phoneNumber;
-        _nameController.text = _lead.name;
-        _addressController.text = _lead.address ?? '';
-        _requirementsController.text = _lead.requirements ?? '';
-        _nextFollowUp = _lead.nextFollowUp;
-        _eventDate = _lead.eventDate;
-      });
-      _loadLatestCalls();
-    }
+    _phoneController = TextEditingController(text: widget.lead.phoneNumber);
+    _nameController = TextEditingController(text: widget.lead.name);
+    _addressController = TextEditingController();
+    _requirementsController = TextEditingController();
+    _loadCallHistory();
   }
 
   @override
   void dispose() {
     _phoneController.dispose();
     _nameController.dispose();
-    _noteController.dispose();
     _addressController.dispose();
     _requirementsController.dispose();
-    _pulseController.dispose();
     super.dispose();
   }
 
-  String _formatDuration(int seconds) {
-    if (seconds < 60) return '${seconds}s';
-    final minutes = (seconds ~/ 60).toString();
-    final secs = (seconds % 60).toString().padLeft(2, '0');
-    return '${minutes}:${secs}'; // mm:ss format
-  }
+  // -------------------------- Firestore load ---------------------------------
 
-  
+  Future<void> _loadCallHistory() async {
+    setState(() {
+      _loadingCalls = true;
+      _loadError = null;
+    });
 
-  Future<String> _getTenantIdFromPrefs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final t = prefs.getString('tenantId');
-      if (t != null && t.isNotEmpty) return t;
-    } catch (_) {}
-    return 'default_tenant';
+      final tenantId = prefs.getString('tenantId') ?? 'default_tenant';
+
+      final snap = await FirebaseFirestore.instance
+          .collection('tenants')
+          .doc(tenantId)
+          .collection('leads')
+          .doc(widget.lead.id)
+          .collection('calls')
+          .orderBy('createdAt', descending: true)
+          .limit(50)
+          .get();
+
+      final calls = snap.docs.map((d) => LeadCall.fromDoc(d)).toList();
+
+      if (!mounted) return;
+      setState(() {
+        _calls = calls;
+        _loadingCalls = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadError = e.toString();
+        _loadingCalls = false;
+      });
+    }
   }
 
-  /// Save and then show a short success modal; then auto-close and return to lead list.
-  Future<void> _saveAll() async {
-    setState(() => _saving = true);
+  // ------------------------------ Helpers ------------------------------------
+
+  bool _isMissedCall(LeadCall call) {
+    final dir = call.direction ?? '';
+    final dur = call.durationInSeconds ?? 0;
+    final outcome = call.finalOutcome ?? '';
+
+    if (dir == 'inbound' && dur == 0) return true;
+    if (outcome == 'missed') return true;
+    return false;
+  }
+
+  bool _isRejectedCall(LeadCall call) {
+    final dir = call.direction ?? '';
+    final dur = call.durationInSeconds ?? 0;
+    final outcome = call.finalOutcome ?? '';
+
+    if (dir != 'outbound') return false;
+    if (dur == 0) return true;
+    if (outcome == 'rejected') return true;
+    return false;
+  }
+
+  String _formatTime24(DateTime? dt) {
+    if (dt == null) return '';
+    final local = dt.toLocal();
+    final hh = local.hour.toString().padLeft(2, '0');
+    final mm = local.minute.toString().padLeft(2, '0');
+    return '$hh:$mm';
+  }
+
+  String _formatDuration(int? seconds) {
+    if (seconds == null) return '';
+    final s = seconds;
+    final m = s ~/ 60;
+    final rem = s % 60;
+    if (m == 0) return '${rem}s';
+    return '${m}m ${rem}s';
+  }
+
+  String _sanitizePhone(String? raw) {
+    if (raw == null) return '';
+    var trimmed = raw.trim();
+
+    if (trimmed.startsWith('+')) {
+      final digits = trimmed.replaceAll(RegExp(r'[^0-9+]'), '');
+      final normalized = '+' + digits.replaceAll('+', '');
+      return normalized;
+    }
+
+    var digitsOnly = trimmed.replaceAll(RegExp(r'[^0-9]'), '');
+
+    while (digitsOnly.startsWith('0')) {
+      digitsOnly = digitsOnly.substring(1);
+    }
+
+    if (digitsOnly.length == 10) {
+      return '+91$digitsOnly';
+    }
+
+    if (digitsOnly.length > 10 && digitsOnly.startsWith('91')) {
+      return '+$digitsOnly';
+    }
+
+    if (digitsOnly.length > 10) {
+      return '+$digitsOnly';
+    }
+
+    return digitsOnly;
+  }
+
+  Future<void> _openDialer(String? rawNumber) async {
+    final number = _sanitizePhone(rawNumber ?? widget.lead.phoneNumber);
+    if (number.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No phone number available')),
+      );
+      return;
+    }
+
+    final uri = Uri(scheme: 'tel', path: number);
+
     try {
-      final prefsTenant = await _getTenantIdFromPrefs();
-      final updated = _lead.copyWith(
-        name: _nameController.text.trim(),
-        address: _addressController.text.trim().isEmpty ? null : _addressController.text.trim(),
-        requirements: _requirementsController.text.trim().isEmpty ? null : _requirementsController.text.trim(),
-        nextFollowUp: _nextFollowUp,
-        eventDate: _eventDate,
-        lastUpdated: DateTime.now(),
-        lastInteraction: DateTime.now(),
-        tenantId: _lead.tenantId.isNotEmpty ? _lead.tenantId : prefsTenant,
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
       );
 
-      final saved = await _service.saveLead(updated);
-
-      setState(() {
-        _lead = saved;
-        _nameController.text = _lead.name;
-        _phoneController.text = _lead.phoneNumber;
-        _addressController.text = _lead.address ?? '';
-        _requirementsController.text = _lead.requirements ?? '';
-        _nextFollowUp = _lead.nextFollowUp;
-        _eventDate = _lead.eventDate;
-      });
-
-      // Show polished success modal that automatically closes and navigates back
-      if (!mounted) return;
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) {
-          // schedule auto-close after 900ms
-          Future.delayed(const Duration(milliseconds: 900), () {
-            if (!mounted) return;
-            // close dialog first
-            if (Navigator.of(ctx).canPop()) Navigator.of(ctx).pop();
-            // then pop this screen and return `true` so the caller can refresh
-            if (Navigator.of(context).canPop()) Navigator.of(context).pop(true);
-          });
-
-          return Dialog(
-            backgroundColor: Colors.transparent,
-            insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-              decoration: BoxDecoration(
-                gradient: _cardGradient,
-                borderRadius: BorderRadius.circular(14),
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 18)],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(height: 6),
-                  CircleAvatar(
-                    radius: 36,
-                    backgroundColor: Colors.green.shade700,
-                    child: const Icon(Icons.check, color: Colors.white, size: 42),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text('Saved', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Lead saved successfully. Returning to lead list...',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.blueGrey.shade700),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-              ),
+      if (!launched) {
+        final fallback = "tel:$number";
+        bool fallbackResult = false;
+        try {
+          if (!kIsWeb) {
+            fallbackResult = await launchUrlString(
+              fallback,
+              mode: LaunchMode.externalApplication,
+            );
+          } else {
+            fallbackResult = await launchUrlString(fallback);
+          }
+        } catch (_) {}
+        if (!fallbackResult && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Could not open the dialer on this device.'),
             ),
           );
-        },
-      );
-    } catch (e) {
-      // show error
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: $e')));
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  // -----------------------------
-// Phone / WhatsApp helpers
-// -----------------------------
-String _sanitizePhone(String? raw) {
-  if (raw == null) return '';
-  var trimmed = raw.trim();
-
-  if (trimmed.startsWith('+')) {
-    final digits = trimmed.replaceAll(RegExp(r'[^0-9+]'), '');
-    final normalized = '+' + digits.replaceAll('+', '');
-    return normalized;
-  }
-
-  var digitsOnly = trimmed.replaceAll(RegExp(r'[^0-9]'), '');
-
-  while (digitsOnly.startsWith('0')) {
-    digitsOnly = digitsOnly.substring(1);
-  }
-
-  if (digitsOnly.length == 10) {
-    return '+91$digitsOnly';
-  }
-
-  if (digitsOnly.length > 10 && digitsOnly.startsWith('91')) {
-    return '+$digitsOnly';
-  }
-
-  if (digitsOnly.length > 10) {
-    return '+$digitsOnly';
-  }
-
-  return digitsOnly;
-}
-
-Future<void> _openDialer(String? rawNumber) async {
-  final number = _sanitizePhone(rawNumber);
-  if (number.isEmpty) {
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No phone number available')));
-    return;
-  }
-  final uri = Uri(scheme: 'tel', path: number);
-
-  try {
-    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!launched) {
-      final fallback = "tel:$number";
-      if (!kIsWeb) {
-        await launchUrlString(fallback, mode: LaunchMode.externalApplication);
-      } else {
-        await launchUrlString(fallback);
-      }
-    }
-  } catch (e) {
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open dialer.')));
-  }
-}
-
-Future<void> _openWhatsApp(String? rawNumber) async {
-  final normalized = _sanitizePhone(rawNumber);
-  if (normalized.isEmpty) {
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No phone number available')));
-    return;
-  }
-
-  final waDigits = normalized.startsWith('+') ? normalized.substring(1) : normalized;
-  final waUri = Uri.parse("https://wa.me/$waDigits");
-  final webWhatsapp = Uri.parse("https://web.whatsapp.com/send?phone=$waDigits");
-
-  try {
-    var opened = await launchUrl(waUri, mode: LaunchMode.externalApplication);
-    if (!opened) {
-      opened = await launchUrl(webWhatsapp, mode: LaunchMode.externalApplication);
-    }
-    if (!opened) {
-      await launchUrlString("https://wa.me/$waDigits", mode: LaunchMode.externalApplication);
-    }
-  } catch (e) {
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not open WhatsApp.')));
-  }
-}
-
-
-  Future<void> _saveStatus(String newStatus) async {
-    final prefsTenant = await _getTenantIdFromPrefs();
-    final updated = _lead.copyWith(
-      status: newStatus,
-      lastInteraction: DateTime.now(),
-      lastUpdated: DateTime.now(),
-      tenantId: _lead.tenantId.isNotEmpty ? _lead.tenantId : prefsTenant,
-    );
-
-    final saved = await _service.saveLead(updated);
-
-    setState(() {
-      _lead = saved;
-      _nameController.text = _lead.name;
-      _phoneController.text = _lead.phoneNumber;
-    });
-
-    // small confirmation snackbar (no navigation)
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Status updated')));
-  }
-
- Future<void> _addNote() async {
-  if (_noteController.text.isEmpty) return;
-
-  // Preserve whatever the user has typed in the name field so a backend refresh doesn't wipe it.
-  final String currentTypedName = _nameController.text.trim();
-
-  // Ensure lead exists server-side (for transient leads)
-  try {
-    if (mounted) {
-      await _persistLeadIfTransient();
-    }
-  } catch (e) {
-    // If persisting failed, still attempt to continue but warn the user
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not create lead first: $e')));
-    }
-    return;
-  }
-
-  final String note = _noteController.text.trim();
-  _noteController.clear();
-
-  try {
-    await _service.addNote(lead: _lead, note: note);
-    _hasUserSavedOrNoted = true;
-
-    // Fetch canonical lead from backend
-    final updatedLead = await _service.getLead(leadId: _lead.id);
-
-    if (!mounted) return;
-
-    setState(() {
-      if (updatedLead != null) {
-        _lead = updatedLead;
-
-        // Preserve user's typed name if they haven't saved it to backend yet.
-        if (currentTypedName.isNotEmpty) {
-          _nameController.text = currentTypedName;
-        } else {
-          _nameController.text = _lead.name;
         }
-
-        _phoneController.text = _lead.phoneNumber;
-        _addressController.text = _lead.address ?? '';
-        _requirementsController.text = _lead.requirements ?? '';
-        _nextFollowUp = _lead.nextFollowUp;
-        _eventDate = _lead.eventDate;
       }
-    });
-
-    // Refresh call list (safe no-op)
-    await _loadLatestCalls();
-  } catch (e) {
-    // keep logs single-line
-    // ignore: avoid_print
-    print('Error adding note: $e');
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to add note: $e')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Error while trying to open dialer.')),
+      );
+    }
   }
-}
 
+  Future<void> _openWhatsApp(String? rawNumber) async {
+    final normalized = _sanitizePhone(rawNumber ?? widget.lead.phoneNumber);
 
-  Widget _sectionTitle(String text) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 20, bottom: 8),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: 18,
-          fontWeight: FontWeight.w700,
-          color: Colors.blueGrey.shade900,
-        ),
+    if (normalized.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("No phone number available")),
+      );
+      return;
+    }
+
+    final waPathNumber =
+        normalized.startsWith('+') ? normalized.substring(1) : normalized;
+    final waUri = Uri.parse("https://wa.me/$waPathNumber");
+    final webWhatsapp =
+        Uri.parse("https://web.whatsapp.com/send?phone=$waPathNumber");
+
+    bool opened = false;
+
+    try {
+      opened = await launchUrl(waUri, mode: LaunchMode.externalApplication);
+    } catch (_) {}
+
+    if (!opened) {
+      try {
+        opened = await launchUrl(
+          webWhatsapp,
+          mode: LaunchMode.externalApplication,
+        );
+      } catch (_) {
+        opened = false;
+      }
+    }
+
+    if (!opened) {
+      try {
+        final fallbackString = "https://wa.me/$waPathNumber";
+        final fallbackLaunched = await launchUrlString(
+          fallbackString,
+          mode: LaunchMode.externalApplication,
+        );
+        opened = fallbackLaunched;
+      } catch (_) {}
+    }
+
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Could not open WhatsApp.")),
+      );
+    }
+  }
+
+  // ----------------- COMMON BORDER + DECORATION FOR FIELDS --------------------
+
+  OutlineInputBorder _neonBorder([double width = 1.4]) {
+    return OutlineInputBorder(
+      borderRadius: BorderRadius.circular(16),
+      borderSide: const BorderSide(
+        color: Color(0xFF3B82F6), // neon-ish blue
+        width: width,
       ),
     );
   }
 
-  Widget _headerCard() {
-    final bool needsReview = _lead.needsManualReview;
-    // Show last seen (from calls subcollection if available)
-    final LatestCall? call = _latestCalls.isNotEmpty ? _latestCalls.first : null;
-    final DateTime? lastSeen = call?.finalizedAt ?? call?.createdAt ?? _lead.lastInteraction;
-    final lastSeenLabel = lastSeen != null ? _formatDateTimeShort(lastSeen) : '—';
+  InputDecoration _neonInputDecoration({
+    String? hint,
+  }) {
+    return InputDecoration(
+      hintText: hint,
+      hintStyle: const TextStyle(
+        color: _mutedText,
+        fontSize: 14,
+      ),
+      filled: true,
+      fillColor: _primaryColor,
+      contentPadding: const EdgeInsets.symmetric(
+        horizontal: 16,
+        vertical: 16,
+      ),
+      border: _neonBorder(),
+      enabledBorder: _neonBorder(),
+      focusedBorder: _neonBorder(1.8), // slightly thicker on focus
+      disabledBorder: _neonBorder(),
+    );
+  }
+
+  Widget _buildLabeledField({
+    required String label,
+    required Widget child,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          child,
+        ],
+      ),
+    );
+  }
+
+  // ------------------------------ UI pieces ----------------------------------
+
+  Widget _buildHeaderCard() {
+    final lead = widget.lead;
+    final phone = lead.phoneNumber;
 
     return Container(
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        gradient: _card_gradient,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10, offset: const Offset(0, 4))],
+        gradient: _cardGradient,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withOpacity(0.06)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.45),
+            blurRadius: 22,
+            offset: const Offset(0, 14),
+          ),
+        ],
       ),
-      padding: const EdgeInsets.all(18),
       child: Row(
         children: [
-          // glossy square with phone icon
           Container(
-            width: 64,
-            height: 64,
+            width: 52,
+            height: 52,
             decoration: BoxDecoration(
-              gradient: LinearGradient(colors: [Colors.white, _primaryColor.withOpacity(0.06)]),
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 6, offset: const Offset(0, 3))],
+              borderRadius: BorderRadius.circular(16),
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFF1D4ED8),
+                  Color(0xFF38BDF8),
+                ],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.55),
+                  blurRadius: 18,
+                  offset: const Offset(0, 10),
+                ),
+              ],
             ),
-            child: Center(
-              child: Icon(Icons.phone_android, size: 30, color: needsReview ? _accentColor : _primaryColor),
+            child: const Center(
+              child: Icon(Icons.person, color: Colors.white, size: 26),
             ),
           ),
           const SizedBox(width: 16),
           Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(
-                _lead.phoneNumber,
-                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  if ((_lead.address ?? '').isNotEmpty)
-                    Flexible(child: Text('Address: ${_lead.address}', style: const TextStyle(fontSize: 13))),
-                ],
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  lead.name.isEmpty ? 'No name' : lead.name,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  phone.isEmpty ? 'No phone' : phone,
+                  style: const TextStyle(
+                    color: _mutedText,
+                    fontSize: 14,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.phone, size: 20),
+                  color: Colors.greenAccent,
+                  onPressed: () => _openDialer(phone),
+                ),
               ),
               const SizedBox(height: 8),
-              Row(
-                children: [
-                  Text('Last seen: $lastSeenLabel', style: TextStyle(fontSize: 13, color: Colors.blueGrey.shade600)),
-                  const SizedBox(width: 10),
-                  if (_lead.nextFollowUp != null)
-                    Chip(label: Text('Follow: ${_formatDateTimeShort(_lead.nextFollowUp!)}')),
-                ],
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: IconButton(
+                  iconSize: 20,
+                  icon: Image.network(
+                    'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
+                    width: 20,
+                    height: 20,
+                    errorBuilder: (_, __, ___) => const Icon(
+                      Icons.message,
+                      size: 20,
+                      color: Colors.greenAccent,
+                    ),
+                  ),
+                  onPressed: () => _openWhatsApp(phone),
+                ),
               ),
-            ]),
+            ],
           ),
-          // Stacked Call + WhatsApp buttons (uses same pulse animation controller)
-Column(
-  mainAxisSize: MainAxisSize.min,
-  children: [
-    ScaleTransition(
-      scale: Tween(begin: 0.98, end: 1.02).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut)),
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10)],
-        ),
-        child: IconButton(
-          icon: const Icon(Icons.phone),
-          color: _primaryColor,
-          tooltip: 'Call',
-          onPressed: () => _openDialer(_lead.phoneNumber),
-        ),
-      ),
-    ),
-    const SizedBox(height: 8),
-    ScaleTransition(
-      scale: Tween(begin: 0.98, end: 1.02).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut)),
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10)],
-        ),
-        child: IconButton(
-          icon: Image.network(
-            'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
-            width: 20,
-            height: 20,
-            errorBuilder: (_, __, ___) => const Icon(Icons.message, size: 20),
-          ),
-          tooltip: 'WhatsApp',
-          onPressed: () => _openWhatsApp(_lead.phoneNumber),
-        ),
-      ),
-    ),
-  ],
-),
-
         ],
       ),
     );
   }
 
-  // -------------------------
-  // Load latest up to 5 calls (tenant-scoped)
-  // -------------------------
-  Future<void> _loadLatestCalls() async {
-    setState(() {
-      _loadingLatestCalls = true;
-    });
+  // ------------- DETAILS FORM (phone, name, status, address, etc.) -----------
 
-    try {
-      if (_lead.id.isEmpty) {
-        setState(() {
-          _latestCalls = [];
-          _loadingLatestCalls = false;
-        });
-        return;
-      }
-
-      final tenantId = await _getTenantIdFromPrefs();
-
-      final q = await FirebaseFirestore.instance
-          .collection('tenants')
-          .doc(tenantId)
-          .collection('leads')
-          .doc(_lead.id)
-          .collection('calls')
-          .orderBy('createdAt', descending: true)
-          .limit(5)
-          .get();
-
-      final list = q.docs.map((d) => LatestCall.fromDoc(d)).toList();
-      setState(() {
-        _latestCalls = list;
-      });
-    } catch (e, st) {
-      // ignore: avoid_print
-      print('Error loading latest calls for lead ${_lead.id}: $e\n$st');
-      setState(() {
-        _latest_calls = [];
-      });
-    } finally {
-      setState(() {
-        _loadingLatestCalls = false;
-      });
-    }
-  }
-
-  String? _timeAgo(DateTime? dt) {
-    if (dt == null) return null;
-    final diff = DateTime.now().difference(dt);
-    if (diff.inSeconds < 60) return '${diff.inSeconds}s';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
-    if (diff.inHours < 24) return '${diff.inHours}h';
-    return '${diff.inDays}d';
-  }
-
-  // compact call row
-  Widget _callRow(LatestCall call) {
-    final dir = call.direction?.toLowerCase();
-    final bool inbound = dir == 'inbound';
-final DateTime? dt = call.finalizedAt ?? call.createdAt;
-final String timeShort = dt != null ? _formatDateTimeShort(dt) : '—';
-    final String duration = (call.durationInSeconds != null) ? _formatDuration(call.durationInSeconds!) : '';
-
-    return InkWell(
-      onTap: () async {
-        // temporarily reload latest calls (or you might navigate to call details)
-        await _loadLatestCalls();
-      },
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 8),
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-        decoration: BoxDecoration(
-          gradient: _cardGradient,
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 6, offset: const Offset(0, 3))],
-          border: Border.all(color: Colors.black.withOpacity(0.02)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: inbound ? Colors.green.withOpacity(0.08) : _primaryColor.withOpacity(0.06),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(inbound ? Icons.call_received : Icons.call_made, color: inbound ? Colors.green.shade700 : _primaryColor, size: 20),
+  Widget _buildDetailsForm() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+          child: Text(
+            'Profile, status & notes',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Text(
+            'Update lead information and requirements.',
+            style: TextStyle(
+              color: _mutedText,
+              fontSize: 13,
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+
+        // Phone number
+        _buildLabeledField(
+          label: 'Phone Number',
+          child: TextFormField(
+            controller: _phoneController,
+            keyboardType: TextInputType.phone,
+            style: const TextStyle(color: Colors.white),
+            decoration: _neonInputDecoration(
+              hint: 'Enter phone number',
+            ),
+          ),
+        ),
+
+        // Lead name
+        _buildLabeledField(
+          label: 'Lead Name',
+          child: TextFormField(
+            controller: _nameController,
+            style: const TextStyle(color: Colors.white),
+            decoration: _neonInputDecoration(
+              hint: 'Enter lead name',
+            ),
+          ),
+        ),
+
+        // Status dropdown
+        _buildLabeledField(
+          label: 'Status',
+          child: DropdownButtonFormField<String>(
+            value: _status,
+            dropdownColor: _primaryColor,
+            style: const TextStyle(color: Colors.white, fontSize: 14),
+            decoration: _neonInputDecoration(),
+            items: const [
+              DropdownMenuItem(
+                value: 'new',
+                child: Text('New'),
+              ),
+              DropdownMenuItem(
+                value: 'in_progress',
+                child: Text('In progress'),
+              ),
+              DropdownMenuItem(
+                value: 'follow_up',
+                child: Text('Follow up'),
+              ),
+              DropdownMenuItem(
+                value: 'converted',
+                child: Text('Converted'),
+              ),
+              DropdownMenuItem(
+                value: 'closed',
+                child: Text('Closed'),
+              ),
+            ],
+            onChanged: (val) {
+              if (val == null) return;
+              setState(() {
+                _status = val;
+              });
+            },
+          ),
+        ),
+
+        // Address
+        _buildLabeledField(
+          label: 'Address',
+          child: TextFormField(
+            controller: _addressController,
+            maxLines: 2,
+            style: const TextStyle(color: Colors.white),
+            decoration: _neonInputDecoration(
+              hint: 'Address (optional)',
+            ),
+          ),
+        ),
+
+        // Requirements
+        _buildLabeledField(
+          label: 'Requirements',
+          child: TextFormField(
+            controller: _requirementsController,
+            maxLines: 3,
+            style: const TextStyle(color: Colors.white),
+            decoration: _neonInputDecoration(
+              hint: 'Requirements / notes',
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+
+  Widget _callHistoryRow(LeadCall call) {
+    final isMissed = _isMissedCall(call);
+    final isRejected = _isRejectedCall(call);
+
+    final statusColor = isMissed || isRejected
+        ? Colors.red.shade400
+        : Colors.greenAccent.shade400;
+
+    final statusLabel = isMissed
+        ? 'MISSED'
+        : isRejected
+            ? 'REJECTED'
+            : (call.durationInSeconds != null &&
+                    (call.durationInSeconds ?? 0) > 0)
+                ? 'ANSWERED'
+                : '';
+
+    final handlerName = (call.handledByUserName ?? '').trim().isEmpty
+        ? null
+        : call.handledByUserName!.trim();
+
+    final timeLabel = _formatTime24(call.finalizedAt ?? call.createdAt);
+    final durationLabel = _formatDuration(call.durationInSeconds);
+
+    Icon directionIcon;
+    if (call.direction == 'inbound') {
+      directionIcon =
+          Icon(Icons.call_received, color: Colors.tealAccent, size: 22);
+    } else if (call.direction == 'outbound') {
+      directionIcon =
+          Icon(Icons.call_made, color: Colors.blueAccent.shade200, size: 22);
+    } else {
+      directionIcon =
+          Icon(Icons.phone, color: Colors.blueGrey.shade200, size: 22);
+    }
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      decoration: BoxDecoration(
+        gradient: _cardGradient,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withOpacity(0.04)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.45),
+            blurRadius: 18,
+            offset: const Offset(0, 12),
+          )
+        ],
+      ),
+      child: Row(
+        children: [
+          // Direction icon box
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFF0F172A),
+                  Color(0xFF020617),
+                ],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.5),
+                  blurRadius: 14,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Center(child: directionIcon),
+          ),
+          const SizedBox(width: 14),
+
+          // Middle info
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Row(
                   children: [
                     Expanded(
                       child: Text(
-                        inbound ? 'Incoming' : 'Outgoing',
-                        style: TextStyle(fontWeight: FontWeight.w700, color: inbound ? Colors.green.shade700 : _primaryColor),
+                        timeLabel.isEmpty ? 'Call' : timeLabel,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
                       ),
                     ),
-                    Text(timeShort, style: TextStyle(color: Colors.blueGrey.shade400, fontSize: 12)),
+                    if (statusLabel.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: (isMissed || isRejected)
+                              ? Colors.red.withOpacity(0.25)
+                              : Colors.green.withOpacity(0.25),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          statusLabel,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.6,
+                            color: statusColor,
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
                 const SizedBox(height: 6),
+
                 Row(
                   children: [
-                    Expanded(child: Text(duration.isNotEmpty ? duration : 'No duration', style: TextStyle(color: Colors.blueGrey.shade600))),
-                    // subtle chevron
-                    Icon(Icons.chevron_right, color: Colors.blueGrey.shade300),
+                    if (handlerName != null) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0B1120),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.08),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.person,
+                                size: 12,
+                                color: Colors.blueGrey.shade100),
+                            const SizedBox(width: 4),
+                            Text(
+                              handlerName,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white70,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    if (durationLabel.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF020617),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                              color: Colors.white.withOpacity(0.04)),
+                        ),
+                        child: Text(
+                          durationLabel,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ),
                   ],
                 ),
-              ]),
+              ],
             ),
-          ],
-        ),
+          ),
+
+          const SizedBox(width: 10),
+
+          // Right side: call + WhatsApp buttons
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF020617),
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.6),
+                      blurRadius: 10,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.phone, size: 20),
+                  color: Colors.greenAccent,
+                  onPressed: () => _openDialer(call.phoneNumber),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF020617),
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.6),
+                      blurRadius: 10,
+                      offset: const Offset(0, 6),
+                    ),
+                  ],
+                ),
+                child: IconButton(
+                  iconSize: 20,
+                  icon: Image.network(
+                    'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
+                    width: 20,
+                    height: 20,
+                    errorBuilder: (_, __, ___) => const Icon(
+                      Icons.message,
+                      size: 20,
+                      color: Colors.greenAccent,
+                    ),
+                  ),
+                  onPressed: () => _openWhatsApp(call.phoneNumber),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
 
-  Widget _callHistorySection() {
-    if (_loadingLatestCalls) {
+  Widget _buildCallHistorySection() {
+    if (_loadingCalls) {
       return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 8.0),
-        child: SizedBox(height: 28, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+        padding: EdgeInsets.symmetric(vertical: 32),
+        child: Center(
+          child: CircularProgressIndicator(),
+        ),
       );
     }
 
-    if (_latestCalls.isEmpty) {
-      return const Text("No call history yet.");
+    if (_loadError != null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Text(
+          'Error loading call history:\n$_loadError',
+          style: const TextStyle(color: Colors.redAccent),
+        ),
+      );
+    }
+
+    if (_calls.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(24),
+        child: Text(
+          'No calls found for this lead yet.',
+          style: TextStyle(color: _mutedText),
+        ),
+      );
     }
 
     return Column(
-      children: _latestCalls.map((c) => _callRow(c)).toList(),
-    );
-  }
-
-  Widget _notesSection() {
-    if (_lead.notes.isEmpty) {
-      return const Text("No notes yet");
-    }
-
-    return Column(
-      children: _lead.notes.reversed.map((note) {
-        return Container(
-          margin: const EdgeInsets.symmetric(vertical: 8),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 6)],
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 24, 16, 4),
+          child: Text(
+            'Call history',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              fontSize: 16,
+            ),
           ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(note.text, style: const TextStyle(fontSize: 14)),
-            const SizedBox(height: 8),
-            Text(_formatDateTimeShort(note.timestamp), style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade300)),
-          ]),
-        );
-      }).toList(),
-    );
-  }
-
-  // Date/time pickers helpers UI
-  Future<void> _pickDateTime({required bool forNextFollowUp}) async {
-    final now = DateTime.now();
-    final initial = forNextFollowUp ? (_nextFollowUp ?? now) : (_eventDate ?? now);
-    final pickedDate = await showDatePicker(
-      context: context,
-      initialDate: initial,
-      firstDate: DateTime(now.year - 5),
-      lastDate: DateTime(now.year + 5),
-    );
-    if (pickedDate == null) return;
-
-    final pickedTime = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(initial));
-    final combined = DateTime(pickedDate.year, pickedDate.month, pickedDate.day, pickedTime?.hour ?? 0, pickedTime?.minute ?? 0);
-
-    setState(() {
-      if (forNextFollowUp) _nextFollowUp = combined;
-      else _eventDate = combined;
-    });
-  }
-
-  Widget _dateRow({required String label, DateTime? value, required VoidCallback onTap}) {
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
-        decoration: BoxDecoration(
-          color: Colors.grey.shade100,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.grey.shade300),
         ),
-        child: Row(
-          children: [
-            Icon(label.contains('Follow') ? Icons.event : Icons.event_available, color: Colors.grey.shade700),
-            const SizedBox(width: 12),
-            Expanded(child: Text(value != null ? _formatDateTimeShort(value) : label, style: const TextStyle(fontSize: 14))),
-            const SizedBox(width: 8),
-            const Icon(Icons.edit, size: 18, color: Colors.blueGrey),
-          ],
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16),
+          child: Text(
+            'Latest calls for this lead',
+            style: TextStyle(
+              color: _mutedText,
+              fontSize: 13,
+            ),
+          ),
         ),
-      ),
+        const SizedBox(height: 8),
+        ListView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: _calls.length,
+          itemBuilder: (context, index) {
+            final call = _calls[index];
+            return _callHistoryRow(call);
+          },
+        ),
+      ],
     );
   }
+
+  // ---------------------------- BUILD ----------------------------------------
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F9),
-      appBar: AppBar(
-        title: const Text('Lead Details'),
-        backgroundColor: _primaryColor,
-        foregroundColor: Colors.white,
-        actions: [
-          // single Save button only (clean UI)
-          IconButton(
-            icon: _saving ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) : const Icon(Icons.save),
-            onPressed: _saving ? null : _saveAll,
-            tooltip: 'Save',
+      backgroundColor: _bgDark1,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(88),
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: _appBarGradient,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.35),
+                blurRadius: 20,
+                offset: const Offset(0, 10),
+              ),
+            ],
           ),
-        ],
+          child: SafeArea(
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: const [
+                        GradientAppBarTitle(
+                          'Lead details',
+                          fontSize: 20,
+                        ),
+                        SizedBox(height: 6),
+                        Text(
+                          'Profile & recent calls',
+                          style: TextStyle(
+                            color: _mutedText,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [_accentIndigo, _accentCyan],
+                      ),
+                      borderRadius: BorderRadius.circular(999),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.35),
+                          blurRadius: 16,
+                          offset: const Offset(0, 8),
+                        ),
+                      ],
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.person,
+                            color: Colors.black87, size: 18),
+                        SizedBox(width: 6),
+                        Text(
+                          'Lead',
+                          style: TextStyle(
+                            color: Colors.black87,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          await _loadLatestCalls();
-        },
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              _bgDark1,
+              _bgDark2,
+            ],
+          ),
+        ),
         child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(16),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            _headerCard(),
-            _sectionTitle('Phone Number'),
-            TextField(
-              controller: _phoneController,
-              readOnly: true,
-              decoration: InputDecoration(
-                filled: true,
-                fillColor: Colors.grey.shade200,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-            _sectionTitle('Name'),
-            TextField(
-              controller: _nameController,
-              decoration: InputDecoration(
-                filled: true,
-                fillColor: Colors.grey.shade200,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              onEditingComplete: _saveAll,
-            ),
-            _sectionTitle('Status'),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.blueGrey.shade200),
-              ),
-              child: DropdownButton<String>(
-                value: _lead.status,
-                isExpanded: true,
-                underline: const SizedBox(),
-                items: _statusOptions.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
-                onChanged: (val) async {
-                  if (val == null) return;
-                  await _saveStatus(val);
-                },
-              ),
-            ),
-            _sectionTitle('Address'),
-            TextField(
-              controller: _address_controller,
-              maxLines: 2,
-              decoration: InputDecoration(
-                hintText: 'Address (optional)',
-                filled: true,
-                fillColor: Colors.grey.shade100,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              onEditingComplete: _saveAll,
-            ),
-            _sectionTitle('Requirements'),
-            TextField(
-              controller: _requirements_controller,
-              maxLines: 3,
-              decoration: InputDecoration(
-                hintText: 'Lead requirements (what they need)',
-                filled: true,
-                fillColor: Colors.grey.shade100,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              onEditingComplete: _saveAll,
-            ),
-            _sectionTitle('Next Follow-up'),
-            const SizedBox(height: 6),
-            _dateRow(label: 'Set next follow-up date', value: _nextFollowUp, onTap: () => _pickDateTime(forNextFollowUp: true)),
-            const SizedBox(height: 12),
-            _sectionTitle('Event Date'),
-            const SizedBox(height: 6),
-            _dateRow(label: 'Set event date', value: _eventDate, onTap: () => _pickDateTime(forNextFollowUp: false)),
-            _sectionTitle('Call History'),
-            const SizedBox(height: 6),
-            _callHistorySection(),
-            _sectionTitle('Notes'),
-            const SizedBox(height: 6),
-            _notesSection(),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _noteController,
-              minLines: 1,
-              maxLines: 3,
-              decoration: InputDecoration(
-                hintText: 'Write a note...',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                suffixIcon: IconButton(
-                  icon: const Icon(Icons.send),
-                  onPressed: _addNote,
-                ),
-              ),
-            ),
-            const SizedBox(height: 40),
-          ]),
+          physics: const BouncingScrollPhysics(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildHeaderCard(),
+              _buildDetailsForm(), // <-- new section with neon borders
+              _buildCallHistorySection(),
+              const SizedBox(height: 32),
+            ],
+          ),
         ),
       ),
     );
