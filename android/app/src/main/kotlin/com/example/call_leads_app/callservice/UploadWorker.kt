@@ -163,6 +163,11 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                     }
                     val callIdFromEvent = (item["callId"] as? String)
 
+                    // 🔹 NEW: carry user identity from queued item into lead/call/event
+                    // moved earlier so matcher can use it when looking for an open call
+                    val handledByUserId = item["handledByUserId"] as? String
+                    val handledByUserName = item["handledByUserName"] as? String
+
                     // tenant handling: prefer explicit tenantId on item, else default to "default_tenant"
                     var tenant = (item["tenantId"] as? String)?.takeIf { it.isNotEmpty() } ?: ""
                     val needsTenantReview = (item["needsTenantReview"] as? Boolean) == true
@@ -198,7 +203,7 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                         callIdFromEvent
                     } else {
                         // BEST-EFFORT: query recent calls for this lead under the tenant and reuse an open one
-                        findOpenCallIdForLeadOrGenerate(firestore, tenant, leadId, phone, ts)
+                        findOpenCallIdForLeadOrGenerate(firestore, tenant, leadId, phone, ts, handledByUserId)
                     }
 
                     // If the worker generated a callId (i.e. callIdFromEvent == null and find returned a gen),
@@ -228,10 +233,6 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                         "createdAt" to FieldValue.serverTimestamp(),
                         "tenantId" to tenant
                     )
-
-                    // 🔹 NEW: carry user identity from queued item into lead/call/event
-                    val handledByUserId = item["handledByUserId"] as? String
-                    val handledByUserName = item["handledByUserName"] as? String
 
                     if (!handledByUserId.isNullOrEmpty()) {
                         // For reports and last-handler on lead
@@ -442,13 +443,18 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
      * Queries the calls subcollection for the lead ordered by createdAt descending,
      * then picks the first doc that appears not-finalized (no finalizedAt / no finalOutcome).
      * If query fails or nothing suitable is found, returns a generated callId.
+     *
+     * Updated: will only reuse an open call if the open call's handledByUserId matches the
+     * provided handledByUserId (when that value is present). If the incoming item does not
+     * contain handledByUserId, the previous (legacy) behavior is used.
      */
     private suspend fun findOpenCallIdForLeadOrGenerate(
         firestore: FirebaseFirestore,
         tenant: String,
         leadId: String,
         phone: String,
-        ts: Long
+        ts: Long,
+        handledByUserId: String?
     ): String {
         try {
             val callsRef = firestore.collection("tenants").document(tenant).collection("leads")
@@ -465,9 +471,22 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                 for (doc in qSnap.documents) {
                     val finalizedAt = doc.get("finalizedAt")
                     val finalOutcome = doc.get("finalOutcome")
+
+                    // If we know which user handled this event, only reuse a call that belongs to the SAME user.
+                    if (!handledByUserId.isNullOrEmpty()) {
+                        val docUserId = doc.getString("handledByUserId")
+                        // If the doc has a different user, skip it.
+                        if (!docUserId.isNullOrEmpty() && docUserId != handledByUserId) {
+                            Log.d(TAG, "Skipping open call ${doc.id} due to user mismatch (docUser=$docUserId vs eventUser=$handledByUserId)")
+                            FirebaseCrashlytics.getInstance().log("Skipping open call due to user mismatch")
+                            continue
+                        }
+                        // If docUserId is null/empty, we allow reuse (backwards-compatible).
+                    }
+
                     if (finalizedAt == null && finalOutcome == null) {
-                        Log.d(TAG, "Reusing open call doc ${doc.id} for phone=$phone under tenant=$tenant")
-                        FirebaseCrashlytics.getInstance().log("Reusing open call doc ${doc.id} for phone")
+                        Log.d(TAG, "Reusing open call doc ${doc.id} for phone=$phone under tenant=$tenant (handledByUserId=$handledByUserId)")
+                        FirebaseCrashlytics.getInstance().log("Reusing open call doc ${doc.id} for phone with user filter")
                         return doc.id
                     }
                 }
