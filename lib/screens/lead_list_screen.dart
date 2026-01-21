@@ -121,6 +121,10 @@ class _LeadListScreenState extends State<LeadListScreen>
   List<Lead> _allLeads = [];
   List<Lead> _filteredLeads = [];
   bool _loading = true;
+  
+
+final ScrollController _scrollCtrl = ScrollController();
+
 
   final TextEditingController _searchCtrl = TextEditingController();
 
@@ -145,93 +149,124 @@ class _LeadListScreenState extends State<LeadListScreen>
 
   late final AnimationController _fabController;
 
+@override
+void initState() {
+  super.initState();
+
+  _fabController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  )..repeat(reverse: true);
+
+  // Use initial filter from caller (Missed / Incoming / etc)
+  _selectedFilter = widget.initialFilter ?? 'All';
+
+  // 🔹 Load leads + all calls ONCE
+  _loadLeads();
+
+  // 🔹 Search works fully in-memory
+  _searchCtrl.addListener(_applySearch);
+}
+
+
+
   @override
-  void initState() {
-    super.initState();
+void dispose() {
+  _searchCtrl.removeListener(_applySearch);
+  _searchCtrl.dispose();
+  _scrollCtrl.dispose();
+  _fabController.dispose();
+  super.dispose();
+}
 
-    _fabController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    )..repeat(reverse: true);
-
-    // Use initialFilter from caller (e.g. "Missed" / "Rejected")
-    _selectedFilter = widget.initialFilter ?? 'All';
-
-    _loadLeads();
-    _searchCtrl.addListener(_applySearch);
-  }
-
-  @override
-  void dispose() {
-    _searchCtrl.removeListener(_applySearch);
-    _searchCtrl.dispose();
-    _fabController.dispose();
-    super.dispose();
-  }
 
   // ---------------------------------------------------------------------------
   // FIRESTORE LOADERS
   // ---------------------------------------------------------------------------
 
-  /// Fetch the single most recent call doc for the given lead from /calls.
-  Future<LatestCall?> fetchLatestCallForLead(String leadId) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final tenantId = (prefs.getString('tenantId') ?? 'default_tenant');
 
-      final q = await FirebaseFirestore.instance
-          .collection('tenants')
-          .doc(tenantId)
-          .collection('leads')
-          .doc(leadId)
-          .collection('calls')
-          .orderBy('createdAt', descending: true)
-          .limit(1)
-          .get();
-
-      if (q.docs.isEmpty) return null;
-      return LatestCall.fromDoc(q.docs.first);
-    } catch (e, st) {
-      // ignore but log
-      // ignore: avoid_print
-      print("fetchLatestCallForLead error for $leadId: $e\n$st");
-      return null;
-    }
-  }
 
   /// Load leads and in parallel fetch latest calls; only keep leads that
   /// actually have at least one /calls doc.
-  Future<void> _loadLeads() async {
-    setState(() => _loading = true);
+Future<void> _loadLeads() async {
+  setState(() => _loading = true);
 
-    await _service.loadLeads();
-    final fetched = _service.getAll();
-    _allLeads = List<Lead>.from(fetched);
+  // 1️⃣ Load all leads
+  await _service.loadLeads();
+  _allLeads = List<Lead>.from(_service.getAll());
 
-    _latestCallByLead.clear();
-    _loadingLatestCalls = true;
-    setState(() {});
+  // 2️⃣ Load ALL calls once (like HomeScreen)
+  final prefs = await SharedPreferences.getInstance();
+  final tenantId = prefs.getString('tenantId') ?? 'default_tenant';
 
-    const int batchSize = 10;
-    for (var i = 0; i < _allLeads.length; i += batchSize) {
-      final batch = _allLeads.skip(i).take(batchSize).toList();
-      final futures = batch.map((l) => fetchLatestCallForLead(l.id)).toList();
-      final results = await Future.wait(futures);
-      for (var j = 0; j < batch.length; j++) {
-        _latestCallByLead[batch[j].id] = results[j];
+  final callSnap = await FirebaseFirestore.instance
+      .collectionGroup('calls')
+      .where('tenantId', isEqualTo: tenantId)
+      .get();
+
+  // 3️⃣ Normalize calls → latest call per PHONE NUMBER
+  final Map<String, LatestCall> latestByPhone = {};
+
+  for (final doc in callSnap.docs) {
+    final call = LatestCall.fromDoc(doc);
+
+    final phone = call.phoneNumber;
+    if (phone == null || phone.isEmpty) continue;
+
+    final callTime = call.finalizedAt ?? call.createdAt;
+    if (callTime == null) continue;
+
+    final existing = latestByPhone[phone];
+    if (existing == null) {
+      latestByPhone[phone] = call;
+    } else {
+      final existingTime =
+          existing.finalizedAt ??
+          existing.createdAt ??
+          DateTime.fromMillisecondsSinceEpoch(0);
+
+      if (callTime.isAfter(existingTime)) {
+        latestByPhone[phone] = call;
       }
-      if (mounted) setState(() {});
-    }
-
-    _loadingLatestCalls = false;
-
-    // Apply search & filter after everything loaded
-    _applySearch();
-
-    if (mounted) {
-      setState(() => _loading = false);
     }
   }
+
+  // 4️⃣ Attach latest call to leads using phoneNumber
+  _latestCallByLead.clear();
+
+  for (final lead in _allLeads) {
+    final phone = lead.phoneNumber.trim();
+    if (latestByPhone.containsKey(phone)) {
+      _latestCallByLead[lead.id] = latestByPhone[phone];
+    }
+  }
+
+  // 5️⃣ Sort leads by latest activity (call → fallback)
+  _allLeads.sort((a, b) {
+    final aTime =
+        (_latestCallByLead[a.id]?.finalizedAt ??
+                _latestCallByLead[a.id]?.createdAt) ??
+            a.lastInteraction ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+
+    final bTime =
+        (_latestCallByLead[b.id]?.finalizedAt ??
+                _latestCallByLead[b.id]?.createdAt) ??
+            b.lastInteraction ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+
+    return bTime.compareTo(aTime);
+  });
+
+  // 6️⃣ Apply filters
+  _applySearch();
+
+  if (mounted) {
+    setState(() => _loading = false);
+  }
+}
+
+
 
   // ---------------------------------------------------------------------------
   // TIME HELPERS
@@ -305,70 +340,78 @@ class _LeadListScreenState extends State<LeadListScreen>
   // ---------------------------------------------------------------------------
 
   void _applySearch() {
-    final query = _searchCtrl.text.toLowerCase();
+  
 
-    // 1. Text search — still require that we have a call for this lead
-    List<Lead> searchFiltered = _allLeads.where((l) {
-      final hasLatest = _latestCallByLead[l.id] != null;
-      if (!hasLatest) return false;
-      return l.name.toLowerCase().contains(query) ||
-          l.phoneNumber.contains(query);
-    }).toList();
+  final query = _searchCtrl.text.toLowerCase();
 
-    // 2. Apply filter (using only _latestCallByLead)
-    List<Lead> afterFilter = searchFiltered.where((l) {
-      if (_selectedFilter == 'All') return true;
+  // ------------------------------------------------------------------
+  // 1. TEXT SEARCH
+  // ------------------------------------------------------------------
+  List<Lead> searchFiltered = _allLeads.where((l) {
+    final matchesQuery =
+        l.name.toLowerCase().contains(query) ||
+        l.phoneNumber.contains(query);
 
-      if (_selectedFilter == 'Today') {
-        final nf = l.nextFollowUp;
-        if (nf == null) return false;
-        return _isSameLocalDay(nf, DateTime.now());
-      }
+    if (!matchesQuery) return false;
 
-      final LatestCall? latest = _latestCallByLead[l.id];
-      if (latest == null) return false; // we already checked, but safe
+    // 🔹 "All" allows leads even if latest call not loaded yet
+    if (_selectedFilter == 'All') return true;
 
-      final direction = latest.direction?.toLowerCase();
-      final dur = latest.durationInSeconds ?? 0;
+    // 🔹 Other filters require latest call
+    return _latestCallByLead[l.id] != null;
+  }).toList();
 
-      if (_selectedFilter == 'Answered') {
-        return dur > 0;
-      }
+  // ------------------------------------------------------------------
+  // 2. APPLY FILTER (call-based filters)
+  // ------------------------------------------------------------------
+  List<Lead> afterFilter = searchFiltered.where((l) {
+    if (_selectedFilter == 'All') return true;
 
-      if (_selectedFilter == 'Missed') {
-        return _isMissedCall(latest);
-      }
+    if (_selectedFilter == 'Today') {
+      final nf = l.nextFollowUp;
+      if (nf == null) return false;
+      return _isSameLocalDay(nf, DateTime.now());
+    }
 
-      if (_selectedFilter == 'Rejected') {
-        return _isRejectedCall(latest);
-      }
+    final LatestCall? latest = _latestCallByLead[l.id];
+    if (latest == null) return false;
 
-      if (_selectedFilter == 'Incoming') {
-        return direction == 'inbound';
-      }
+    final direction = latest.direction?.toLowerCase();
+    final dur = latest.durationInSeconds ?? 0;
 
-      if (_selectedFilter == 'Outgoing') {
-        return direction == 'outbound';
-      }
+    if (_selectedFilter == 'Answered') return dur > 0;
+    if (_selectedFilter == 'Missed') return _isMissedCall(latest);
+    if (_selectedFilter == 'Rejected') return _isRejectedCall(latest);
+    if (_selectedFilter == 'Incoming') return direction == 'inbound';
+    if (_selectedFilter == 'Outgoing') return direction == 'outbound';
 
-      return false;
-    }).toList();
+    return false;
+  }).toList();
 
-    // 3. Sort by most recent call (from /calls)
-    afterFilter.sort((a, b) {
-      DateTime aTime = (_latestCallByLead[a.id]?.finalizedAt ??
-              _latestCallByLead[a.id]?.createdAt) ??
-          a.lastInteraction;
-      DateTime bTime = (_latestCallByLead[b.id]?.finalizedAt ??
-              _latestCallByLead[b.id]?.createdAt) ??
-          b.lastInteraction;
-      return bTime.compareTo(aTime);
-    });
+  // ------------------------------------------------------------------
+  // 3. SORT — LATEST FIRST (calls → interaction → fallback)
+  // ------------------------------------------------------------------
+  afterFilter.sort((a, b) {
+    final DateTime aTime =
+        (_latestCallByLead[a.id]?.finalizedAt ??
+                _latestCallByLead[a.id]?.createdAt) ??
+            a.lastInteraction ??
+            DateTime.fromMillisecondsSinceEpoch(0);
 
-    setState(() {
-      _filteredLeads = afterFilter;
-    });
-  }
+    final DateTime bTime =
+        (_latestCallByLead[b.id]?.finalizedAt ??
+                _latestCallByLead[b.id]?.createdAt) ??
+            b.lastInteraction ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+
+    return bTime.compareTo(aTime);
+  });
+
+  setState(() {
+    _filteredLeads = afterFilter;
+  });
+}
+
 
   void _changeFilter(String filter) {
     setState(() {
@@ -1360,18 +1403,18 @@ SizedBox(
                   const SizedBox(height: 10),
 
                   // LIST with pull-to-refresh
-                  Expanded(
-                    child: RefreshIndicator(
-                      color: _accentCyan,
-                      backgroundColor: _primaryColor,
-                      onRefresh: _loadLeads,
-                      child: ListView(
-                        physics:
-                            const AlwaysScrollableScrollPhysics(),
-                        children: groupedWidgets,
-                      ),
-                    ),
-                  ),
+               Expanded(
+  child: RefreshIndicator(
+    color: _accentCyan,
+    backgroundColor: _primaryColor,
+    onRefresh: _loadLeads,
+    child: ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: groupedWidgets,
+    ),
+  ),
+),
+
                 ],
               ),
       ),

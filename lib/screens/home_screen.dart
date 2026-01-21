@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:async';
 
 import '../services/lead_service.dart';
 import '../models/lead.dart';
@@ -81,10 +82,15 @@ class _HomeScreenState extends State<HomeScreen> {
   // For call-log sync progress
   bool _syncing = false;
   String _syncLabel = "";
+int _missedCount = 0;
+int _rejectedCount = 0;
+int _answeredCount = 0;
+
+StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _callSub;
 
   // latest call per leadId
-  final Map<String, LatestCall?> _latestCallByLead = {};
-  bool _loadingLatestCalls = false;
+  // final Map<String, LatestCall?> _latestCallByLead = {};
+  // bool _loadingLatestCalls = false;
 
   // Dark / Neon Palette
   final Color _bgDark1 = const Color(0xFF020617);
@@ -101,6 +107,96 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _loadTenantAndLeads();
   }
+  @override
+void dispose() {
+  _callSub?.cancel();
+  super.dispose();
+}
+
+
+void _listenToCalls() {
+  if (_tenantId.isEmpty) return;
+
+  _callSub?.cancel();
+
+  _callSub = FirebaseFirestore.instance
+      .collectionGroup('calls')
+      .where('tenantId', isEqualTo: _tenantId)
+      .snapshots()
+      .listen((snapshot) {
+    if (!mounted) return;
+
+    // Map phoneNumber -> latest call doc
+    final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>> latestByPhone =
+        {};
+
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+
+      final phone = data['phoneNumber'] as String?;
+      final createdAt = data['createdAt'];
+
+      if (phone == null || createdAt == null) continue;
+
+      final DateTime createdTime = createdAt is Timestamp
+          ? createdAt.toDate()
+          : DateTime.tryParse(createdAt.toString()) ??
+              DateTime.fromMillisecondsSinceEpoch(0);
+
+      final existing = latestByPhone[phone];
+
+      if (existing == null) {
+        latestByPhone[phone] = doc;
+      } else {
+        final existingTime =
+            (existing.data()['createdAt'] as Timestamp).toDate();
+        if (createdTime.isAfter(existingTime)) {
+          latestByPhone[phone] = doc;
+        }
+      }
+    }
+
+    int missed = 0;
+    int rejected = 0;
+    int answered = 0;
+
+    for (final doc in latestByPhone.values) {
+      final data = doc.data();
+
+      final dir = (data['direction'] as String?)?.toLowerCase();
+      final dur = (data['durationInSeconds'] as num?)?.toInt() ?? 0;
+      final outcome = (data['finalOutcome'] as String?)?.toLowerCase();
+
+      // MISSED
+      if ((dir == 'inbound' && dur == 0) || outcome == 'missed') {
+        missed++;
+      }
+      // REJECTED
+      else if (dir == 'outbound' &&
+          (dur == 0 || outcome == 'rejected')) {
+        rejected++;
+      }
+      // ANSWERED
+      else if (dur > 0) {
+        answered++;
+      }
+    }
+
+    if (_missedCount == missed &&
+        _rejectedCount == rejected &&
+        _answeredCount == answered) {
+      return;
+    }
+
+    setState(() {
+      _missedCount = missed;
+      _rejectedCount = rejected;
+      _answeredCount = answered;
+    });
+  });
+}
+
+
 
   Future<void> _loadTenantAndLeads() async {
     setState(() => _loading = true);
@@ -108,6 +204,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // Load tenantId
     final prefs = await SharedPreferences.getInstance();
     _tenantId = prefs.getString('tenantId') ?? '';
+_listenToCalls();
 
     print("🏷 Loaded tenantId in HomeScreen: $_tenantId");
 
@@ -116,7 +213,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _leads = List<Lead>.from(_leadService.getAll());
 
     // Load latest calls for each lead
-    await _loadLatestCallsForLeads();
+    // await _loadLatestCallsForLeads();
 
     setState(() => _loading = false);
   }
@@ -147,59 +244,60 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   /// Load latest calls in small batches
-  Future<void> _loadLatestCallsForLeads() async {
-    _latestCallByLead.clear();
-    if (_leads.isEmpty) return;
+  // Future<void> _loadLatestCallsForLeads() async {
+  //   _latestCallByLead.clear();
+  //   if (_leads.isEmpty) return;
 
-    setState(() => _loadingLatestCalls = true);
+  //   setState(() => _loadingLatestCalls = true);
 
-    const int batchSize = 10;
-    for (var i = 0; i < _leads.length; i += batchSize) {
-      final batch = _leads.skip(i).take(batchSize).toList();
-      final futures = batch.map((l) => _fetchLatestCallForLead(l.id)).toList();
-      final results = await Future.wait(futures);
-      for (var j = 0; j < batch.length; j++) {
-        _latestCallByLead[batch[j].id] = results[j];
-      }
-      if (mounted) setState(() {});
-    }
+  //   const int batchSize = 10;
+  //   for (var i = 0; i < _leads.length; i += batchSize) {
+  //     final batch = _leads.skip(i).take(batchSize).toList();
+  //     final futures = batch.map((l) => _fetchLatestCallForLead(l.id)).toList();
+  //     final results = await Future.wait(futures);
+  //     for (var j = 0; j < batch.length; j++) {
+  //       _latestCallByLead[batch[j].id] = results[j];
+  //     }
+  //     if (mounted) setState(() {});
+  //   }
 
-    if (mounted) {
-      setState(() => _loadingLatestCalls = false);
-    }
-  }
+  //   if (mounted) {
+  //     setState(() => _loadingLatestCalls = false);
+  //   }
+  // }
+  
 
-  // ----------------- MISSED / REJECTED HEURISTICS (from calls doc) -----------------
+  // // ----------------- MISSED / REJECTED HEURISTICS (from calls doc) -----------------
 
-  bool _isMissedCall(LatestCall? latest) {
-    if (latest == null) return false;
+  // bool _isMissedCall(LatestCall? latest) {
+  //   if (latest == null) return false;
 
-    final dir = latest.direction?.toLowerCase();
-    final dur = latest.durationInSeconds ?? 0;
-    final outcome = (latest.finalOutcome ?? '').toLowerCase();
+  //   final dir = latest.direction?.toLowerCase();
+  //   final dur = latest.durationInSeconds ?? 0;
+  //   final outcome = (latest.finalOutcome ?? '').toLowerCase();
 
-    // inbound + 0 sec  OR  explicit finalOutcome == "missed"
-    if (dir == 'inbound' && dur == 0) return true;
-    if (outcome == 'missed') return true;
+  //   // inbound + 0 sec  OR  explicit finalOutcome == "missed"
+  //   if (dir == 'inbound' && dur == 0) return true;
+  //   if (outcome == 'missed') return true;
 
-    return false;
-  }
+  //   return false;
+  // }
 
-  bool _isRejectedCall(LatestCall? latest) {
-    if (latest == null) return false;
+  // bool _isRejectedCall(LatestCall? latest) {
+  //   if (latest == null) return false;
 
-    final dir = latest.direction?.toLowerCase();
-    final dur = latest.durationInSeconds ?? 0;
-    final outcome = (latest.finalOutcome ?? '').toLowerCase();
+  //   final dir = latest.direction?.toLowerCase();
+  //   final dur = latest.durationInSeconds ?? 0;
+  //   final outcome = (latest.finalOutcome ?? '').toLowerCase();
 
-    // Only outgoing are considered rejected
-    if (dir != 'outbound') return false;
+  //   // Only outgoing are considered rejected
+  //   if (dir != 'outbound') return false;
 
-    if (dur == 0) return true;
-    if (outcome == 'rejected') return true;
+  //   if (dur == 0) return true;
+  //   if (outcome == 'rejected') return true;
 
-    return false;
-  }
+  //   return false;
+  // }
 
   // -------------------------- UI HELPERS --------------------------
 
@@ -345,46 +443,47 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Generic runner for call-log sync with nice progress UI
   Future<void> _runFixFromCallLog({
-    required Future<void> Function() action,
-    required String label,
-  }) async {
-    if (_syncing) return; // prevent double taps
+  required Future<void> Function() action,
+  required String label,
+}) async {
+  if (_syncing) return;
 
-    setState(() {
-      _syncing = true;
-      _syncLabel = "Syncing $label from phone log...";
-    });
+  setState(() {
+    _syncing = true;
+    _syncLabel = "Syncing $label from phone log...";
+  });
 
-    try {
-      await action();
+  try {
+    await action();
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text("Finished syncing $label from call log."),
-        ),
-      );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text("Finished syncing $label from call log."),
+      ),
+    );
 
-      // Reload latest calls after sync
-      await _loadLatestCallsForLeads();
-      if (mounted) setState(() {});
-    } catch (e, st) {
-      FirebaseCrashlytics.instance.recordError(e, st);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text("Failed to sync $label. Check logs."),
-        ),
-      );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _syncing = false;
-          _syncLabel = "";
-        });
-      }
+    // ✅ NO manual reload needed
+    // Firestore stream will auto-update counts
+
+  } catch (e, st) {
+    FirebaseCrashlytics.instance.recordError(e, st);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text("Failed to sync $label. Check logs."),
+      ),
+    );
+  } finally {
+    if (mounted) {
+      setState(() {
+        _syncing = false;
+        _syncLabel = "";
+      });
     }
   }
+}
+
 
   Future<void> _runFixTodayFromCallLog() async {
     return _runFixFromCallLog(
@@ -594,17 +693,20 @@ class _HomeScreenState extends State<HomeScreen> {
     final totalLeads = _leads.length;
     final followUpCount =
         _leads.where((e) => e.status == "Follow Up").length;
+        final missedCount = _missedCount;
+final rejectedCount = _rejectedCount;
+
 
     // Missed / Rejected based on latest /calls doc
-    final missedCount = _leads.where((lead) {
-      final latest = _latestCallByLead[lead.id];
-      return _isMissedCall(latest);
-    }).length;
+    // final missedCount = _leads.where((lead) {
+    //   final latest = _latestCallByLead[lead.id];
+    //   return _isMissedCall(latest);
+    // }).length;
 
-    final rejectedCount = _leads.where((lead) {
-      final latest = _latestCallByLead[lead.id];
-      return _isRejectedCall(latest);
-    }).length;
+    // final rejectedCount = _leads.where((lead) {
+    //   final latest = _latestCallByLead[lead.id];
+    //   return _isRejectedCall(latest);
+    // }).length;
 
     return Scaffold(
       backgroundColor: _bgDark1,
@@ -664,14 +766,15 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ),
                           Text(
-                            _loadingLatestCalls
-                                ? "Loading call stats..."
-                                : "Total: $totalLeads leads",
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: _mutedText,
-                            ),
-                          ),
+  _loading
+      ? "Loading dashboard..."
+      : "Total: $totalLeads leads",
+  style: TextStyle(
+    fontSize: 13,
+    color: _mutedText,
+  ),
+),
+
                         ],
                       ),
                       const SizedBox(height: 10),
