@@ -236,7 +236,11 @@ void dispose() {
 
   /// Load leads and in parallel fetch latest calls; only keep leads that
   /// actually have at least one /calls doc.
-Future<void> _loadLeads({bool background = false}) async {
+Future<void> _loadLeads({
+  bool background = false,
+  bool allowFirestore = false,
+}) async {
+
   // ❗ Only show loader if NOT background refresh
   if (!background) {
     setState(() => _loading = true);
@@ -250,14 +254,40 @@ Future<void> _loadLeads({bool background = false}) async {
   final prefs = await SharedPreferences.getInstance();
   final tenantId = prefs.getString('tenantId') ?? 'default_tenant';
 
-  final Map<String, Map<String, dynamic>> callsByPhone =
-      await loadLatestCalls(
-    tenantId: tenantId,
-    from: _fromDate,
-    to: _toDate,
-  );
+ // 2️⃣ Load latest calls (CACHE FIRST → Firestore ONLY if allowed & cache empty)
+final cache = CallCache.instance;
 
-  debugPrint("📞 Phones with latest calls: ${callsByPhone.length}");
+final Map<String, Map<String, dynamic>> cached =
+    cache.isValid(
+      tenantId: tenantId,
+      from: _fromDate,
+      to: _toDate,
+    )
+        ? cache.latestByPhone
+        : {};
+
+
+final Map<String, Map<String, dynamic>> callsByPhone =
+    cached.isNotEmpty
+        ? cached
+        : allowFirestore
+            ? await loadLatestCalls(
+                tenantId: tenantId,
+                from: _fromDate,
+                to: _toDate,
+                backgroundRefresh: false,
+              )
+            : <String, Map<String, dynamic>>{};
+
+// 🧪 DEBUG LOG (safe to keep or remove later)
+debugPrint(
+  cached.isNotEmpty
+      ? "🟢 Calls from CACHE: ${cached.length}"
+      : allowFirestore
+          ? "🔥 Calls from FIRESTORE: ${callsByPhone.length}"
+          : "⚠️ Calls blocked (cache empty, firestore disabled)",
+);
+
 
   // 3️⃣ Attach latest call to leads (UNCHANGED LOGIC)
   _latestCallByLead.clear();
@@ -316,17 +346,21 @@ void _applyDateFilter(String filter) {
     _toDate = now;
   });
 
-  _loadLeads(); // 🔄 reload calls only when user asks
+  _loadLeads(allowFirestore: true);
+ // 🔄 reload calls only when user asks
 }
 
 Future<void> _refreshFast() async {
-  // 🔥 Mark call cache stale
-  CallCache.instance.invalidate();
+  // 🚫 DO NOT invalidate call cache here
+  // This is ONLY for UI refresh after navigation
 
   await _service.loadLeads();
   _allLeads = List<Lead>.from(_service.getAll());
+
+  // In-memory only
   _applySearch();
 }
+
 
 
   // ---------------------------------------------------------------------------
@@ -633,7 +667,8 @@ Future<void> _pickCustomDateRange() async {
     _toDate = picked.end;
   });
 
-  _loadLeads();
+  _loadLeads(allowFirestore: true);
+
 }
 
 
@@ -1541,7 +1576,40 @@ SizedBox(
   child: RefreshIndicator(
     color: _accentCyan,
     backgroundColor: _primaryColor,
-     onRefresh: _refreshFast,
+   onRefresh: () async {
+  // 1️⃣ force Firestore
+  CallCache.instance.invalidate();
+
+  // 2️⃣ reload leads
+  await _service.loadLeads();
+  _allLeads = List<Lead>.from(_service.getAll());
+
+  // 3️⃣ reload calls
+  final prefs = await SharedPreferences.getInstance();
+  final tenantId = prefs.getString('tenantId') ?? 'default_tenant';
+
+  await loadLatestCalls(
+    tenantId: tenantId,
+    from: _fromDate,
+    to: _toDate,
+    backgroundRefresh: false,
+  );
+
+  // 4️⃣ READ FROM CACHE
+  final refreshed = CallCache.instance.latestByPhone;
+
+  // 5️⃣ reattach calls
+  _latestCallByLead.clear();
+  for (final lead in _allLeads) {
+    final callData = refreshed[lead.phoneNumber.trim()];
+    if (callData != null) {
+      _latestCallByLead[lead.id] = LatestCall.fromMap(callData);
+    }
+  }
+
+  _applySearch();
+},
+
 
     child: ListView(
       physics: const AlwaysScrollableScrollPhysics(),

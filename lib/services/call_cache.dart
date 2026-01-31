@@ -4,6 +4,7 @@ class CallCache {
   static final CallCache instance = CallCache._();
   CallCache._();
 
+  /// Scope
   String? tenantId;
   DateTime? from;
   DateTime? to;
@@ -11,38 +12,46 @@ class CallCache {
   /// phoneNumber → latest call doc data
   final Map<String, Map<String, dynamic>> latestByPhone = {};
 
+  /// When Firestore was last hit
   DateTime? lastLoadedAt;
 
   /// 🛑 Prevent parallel refreshes
   bool isRefreshing = false;
 
-  /// Check whether cache can be reused
+  /// ✅ Used ONLY to decide whether Firestore should be hit again
   bool isValid({
     required String tenantId,
     required DateTime from,
     required DateTime to,
   }) {
     if (this.tenantId != tenantId) return false;
-
-    // ⚠️ DateTime object comparison is unsafe → compare timestamps
-    if (this.from?.millisecondsSinceEpoch !=
-        from.millisecondsSinceEpoch) return false;
-
-    if (this.to?.millisecondsSinceEpoch !=
-        to.millisecondsSinceEpoch) return false;
-
     if (lastLoadedAt == null) return false;
 
-    // Cache valid for 60 seconds
+    // Cache freshness window (60 seconds)
     return DateTime.now().difference(lastLoadedAt!).inSeconds < 60;
   }
 
-  /// 🔥 Mark cache as stale (forces reload on next access)
+  /// 📦 READ cached calls
+  /// ⚠️ IMPORTANT:
+  /// - Do NOT block on from/to mismatch
+  /// - DateTimes differ slightly across screens
+  /// - Cache is still valid for UI usage
+  Map<String, Map<String, dynamic>> getLatestCalls({
+    required String tenantId,
+    required DateTime from,
+    required DateTime to,
+  }) {
+    if (this.tenantId != tenantId) return {};
+
+    return latestByPhone;
+  }
+
+  /// 🔥 Mark cache as stale (forces Firestore refresh next time)
   void invalidate() {
     lastLoadedAt = null;
   }
 
-  /// 🧹 Fully clear cache and scope (tenant / date change, logout, etc.)
+  /// 🧹 Fully clear cache (logout / tenant switch)
   void clear() {
     latestByPhone.clear();
     tenantId = null;

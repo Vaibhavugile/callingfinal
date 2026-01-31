@@ -79,6 +79,8 @@ class _HomeScreenState extends State<HomeScreen> {
 DateTime _fromDate = DateTime.now().subtract(const Duration(days: 2));
 DateTime _toDate = DateTime.now();
 String _dateFilter = '2d';
+bool _didInitialLoad = false;
+
 
   bool _loading = true;
   List<Lead> _leads = [];
@@ -113,16 +115,32 @@ StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _callSub;
 void initState() {
   super.initState();
 
-  // Initial load
-  _loadTenantAndLeads();
-
-  // 🔄 Soft auto-invalidate every 30s (does NOT hit Firestore)
-
+  if (!_didInitialLoad) {
+    _didInitialLoad = true;
+    _initOnAppOpen();
+  }
 }
+
+
+Future<void> _initOnAppOpen() async {
+  await _loadTenantAndLeads();
+
+  // 🔥 ONE-TIME Firestore load on app open
+  await loadLatestCalls(
+    tenantId: _tenantId,
+    from: _fromDate,
+    to: _toDate,
+    backgroundRefresh: false,
+  );
+
+  // ✅ UI from cache only
+  await _loadCallStatsOnce();
+}
+
 
 @override
 void dispose() {
-  // Clean up timer
+  // Clean up timers
 
   // Existing cleanup
   _callSub?.cancel();
@@ -135,11 +153,13 @@ Future<void> _loadCallStatsOnce() async {
   if (_tenantId.isEmpty) return;
 
   try {
-    final calls = await loadLatestCalls(
-      tenantId: _tenantId,
-      from: _fromDate,
-      to: _toDate,
-    );
+  final calls = await loadLatestCalls(
+  tenantId: _tenantId,
+  from: _fromDate,
+  to: _toDate,
+  backgroundRefresh: false,
+);
+
 
     int missed = 0;
     int rejected = 0;
@@ -363,7 +383,7 @@ Future<void> _fixAllZeroDurationCallsAllTime() async {
     // Load tenantId
     final prefs = await SharedPreferences.getInstance();
     _tenantId = prefs.getString('tenantId') ?? '';
-await _loadCallStatsOnce();
+// await _loadCallStatsOnce();
 
 
     print("🏷 Loaded tenantId in HomeScreen: $_tenantId");
@@ -992,10 +1012,21 @@ final rejectedCount = _rejectedCount;
                 ),
               ),
               child: RefreshIndicator(
-                onRefresh: () async {
-  CallCache.instance.invalidate();
+   onRefresh: () async {
+  CallCache.instance.clear();
+
   await _loadTenantAndLeads();
+
+  await loadLatestCalls(
+    tenantId: _tenantId,
+    from: _fromDate,
+    to: _toDate,
+    backgroundRefresh: false,
+  );
+
+  await _loadCallStatsOnce();
 },
+
 
                 child: SingleChildScrollView(
                   physics: const AlwaysScrollableScrollPhysics(),
