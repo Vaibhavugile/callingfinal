@@ -1384,6 +1384,14 @@ class _LeadFormScreenState extends State<LeadFormScreen>
                   ),
                   onEditingComplete: () => _saveLead(),
                 ),
+                _sectionTitle("Event Date"),
+                const SizedBox(height: 6),
+                _dateButton(
+                  label: 'Set event date',
+                  value: _eventDate,
+                  onTap: () => _pickDateTime(forNextFollowUp: false),
+                ),
+
 
                 _sectionTitle("Requirements"),
                 TextField(
@@ -1418,14 +1426,7 @@ class _LeadFormScreenState extends State<LeadFormScreen>
                 ),
 
                 const SizedBox(height: 12),
-                _sectionTitle("Event Date"),
-                const SizedBox(height: 6),
-                _dateButton(
-                  label: 'Set event date',
-                  value: _eventDate,
-                  onTap: () => _pickDateTime(forNextFollowUp: false),
-                ),
-
+                
                 _sectionTitle("Call History"),
                 const SizedBox(height: 6),
                 _callHistorySection(),

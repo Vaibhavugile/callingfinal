@@ -10,6 +10,9 @@ import '../models/lead.dart';
 import '../services/lead_service.dart';
 import 'lead_form_screen.dart';
 import '../widgets/gradient_appbar_title.dart';
+import '../services/call_loader.dart';
+import '../services/call_cache.dart';
+
 // -------------------------------------------------------------------------
 // ✨ Premium dark glass theme (matched to web admin)
 // -------------------------------------------------------------------------
@@ -56,8 +59,7 @@ class LatestCall {
   final DateTime? finalizedAt;
   final String? finalOutcome;
 
-  // you might already have handledByUserName etc added here in your project;
-  // keep your extra fields if you have them.
+  // optional extra field
   final String? handledByUserName;
 
   LatestCall({
@@ -71,6 +73,7 @@ class LatestCall {
     this.handledByUserName,
   });
 
+  /// 🔹 From Firestore document (used when reading directly from /calls)
   factory LatestCall.fromDoc(QueryDocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
 
@@ -98,7 +101,32 @@ class LatestCall {
       handledByUserName: (data['handledByUserName'] as String?)?.trim(),
     );
   }
+
+  /// 🔹 From cached Map<String, dynamic> (used with call_loader cache)
+  factory LatestCall.fromMap(Map<String, dynamic> data) {
+    DateTime? _toDate(Object? v) {
+      if (v == null) return null;
+      if (v is Timestamp) return v.toDate();
+      if (v is DateTime) return v;
+      try {
+        return DateTime.parse(v.toString());
+      } catch (_) {
+        return null;
+      }
+    }
+
+    return LatestCall(
+      phoneNumber: (data['phoneNumber'] as String?)?.trim(),
+      direction: (data['direction'] as String?)?.toLowerCase(),
+      durationInSeconds: (data['durationInSeconds'] as num?)?.toInt(),
+      createdAt: _toDate(data['createdAt']),
+      finalizedAt: _toDate(data['finalizedAt']),
+      finalOutcome: (data['finalOutcome'] as String?)?.toLowerCase(),
+      handledByUserName: (data['handledByUserName'] as String?)?.trim(),
+    );
+  }
 }
+
 
 class LeadListScreen extends StatefulWidget {
   /// Optional initial filter ("All", "Incoming", "Outgoing", "Missed", "Rejected", "Today")
@@ -117,15 +145,16 @@ class _LeadListScreenState extends State<LeadListScreen>
     with TickerProviderStateMixin {
   // Use singleton so cache is shared
   final LeadService _service = LeadService.instance;
-DateTime _fromDate = DateTime.now().subtract(const Duration(days: 7));
+DateTime _fromDate = DateTime.now().subtract(const Duration(days: 2));
 DateTime _toDate = DateTime.now();
-String _dateFilter = '7d'; // '7d', '30d', 'custom'
+String _dateFilter = '2d';
+
 
 
   List<Lead> _allLeads = [];
   List<Lead> _filteredLeads = [];
-  bool _loading = true;
-  
+  bool _loading = false;
+
 
 final ScrollController _scrollCtrl = ScrollController();
 
@@ -157,20 +186,35 @@ final ScrollController _scrollCtrl = ScrollController();
 void initState() {
   super.initState();
 
+  // ✅ ALWAYS initialize AnimationController FIRST
   _fabController = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1400),
   )..repeat(reverse: true);
 
-  // Use initial filter from caller (Missed / Incoming / etc)
   _selectedFilter = widget.initialFilter ?? 'All';
 
-  // 🔹 Load leads + all calls ONCE
-  _loadLeads();
+  // ✅ Use cached leads instantly (NO loader)
+  _allLeads = List<Lead>.from(_service.getAll());
 
-  // 🔹 Search works fully in-memory
+  if (_allLeads.isNotEmpty) {
+    // Instant UI
+    _applySearch();
+
+    // 🔄 Silent background refresh (NO spinner)
+    Future.microtask(() async {
+      if (!mounted) return;
+      await _loadLeads(background: true);
+    });
+  } else {
+    // First app launch → show loader
+    _loadLeads();
+  }
+
   _searchCtrl.addListener(_applySearch);
 }
+
+
 
 
 
@@ -192,80 +236,42 @@ void dispose() {
 
   /// Load leads and in parallel fetch latest calls; only keep leads that
   /// actually have at least one /calls doc.
-Future<void> _loadLeads() async {
-  setState(() => _loading = true);
+Future<void> _loadLeads({bool background = false}) async {
+  // ❗ Only show loader if NOT background refresh
+  if (!background) {
+    setState(() => _loading = true);
+  }
 
-  // 1️⃣ Load all leads
+  // 1️⃣ Load all leads (UNCHANGED LOGIC)
   await _service.loadLeads();
   _allLeads = List<Lead>.from(_service.getAll());
 
-  // 2️⃣ Load calls (PAGINATED & DATE-BOUND)
+  // 2️⃣ Load latest calls (CACHED + SHARED)
   final prefs = await SharedPreferences.getInstance();
   final tenantId = prefs.getString('tenantId') ?? 'default_tenant';
 
-  final Timestamp fromTs = Timestamp.fromDate(_fromDate);
-  final Timestamp toTs = Timestamp.fromDate(_toDate);
+  final Map<String, Map<String, dynamic>> callsByPhone =
+      await loadLatestCalls(
+    tenantId: tenantId,
+    from: _fromDate,
+    to: _toDate,
+  );
 
-  final Map<String, LatestCall> latestByPhone = {};
+  debugPrint("📞 Phones with latest calls: ${callsByPhone.length}");
 
-  QueryDocumentSnapshot<Map<String, dynamic>>? lastDoc;
-  bool reachedOldData = false;
-  int totalFetched = 0;
-
-  while (!reachedOldData) {
-    Query<Map<String, dynamic>> query = FirebaseFirestore.instance
-        .collectionGroup('calls')
-        .orderBy('createdAt', descending: true)
-        .where('tenantId', isEqualTo: tenantId)
-        .where('createdAt', isLessThanOrEqualTo: toTs)
-        .limit(400);
-
-    if (lastDoc != null) {
-      query = query.startAfterDocument(lastDoc);
-    }
-
-    final snap = await query.get();
-    if (snap.docs.isEmpty) break;
-
-    totalFetched += snap.docs.length;
-
-    for (final doc in snap.docs) {
-      final call = LatestCall.fromDoc(doc);
-      final DateTime? createdAt = call.createdAt;
-
-      if (createdAt == null) continue;
-
-      // ⛔ STOP pagination once outside date range
-      // MUST match orderBy field (createdAt)
-      if (createdAt.isBefore(_fromDate)) {
-        reachedOldData = true;
-        break;
-      }
-
-      final phone = call.phoneNumber;
-      if (phone == null || phone.isEmpty) continue;
-
-      // Ordered DESC → first occurrence is latest
-      latestByPhone.putIfAbsent(phone, () => call);
-    }
-
-    lastDoc = snap.docs.last;
-  }
-
-  debugPrint("📊 LeadList calls scanned: $totalFetched");
-  debugPrint("📞 Phones with latest calls: ${latestByPhone.length}");
-
-  // 3️⃣ Attach latest call to leads
+  // 3️⃣ Attach latest call to leads (UNCHANGED LOGIC)
   _latestCallByLead.clear();
 
   for (final lead in _allLeads) {
     final phone = lead.phoneNumber.trim();
-    if (latestByPhone.containsKey(phone)) {
-      _latestCallByLead[lead.id] = latestByPhone[phone];
+    final callData = callsByPhone[phone];
+
+    if (callData != null) {
+      _latestCallByLead[lead.id] = LatestCall.fromMap(callData);
     }
   }
 
-  // 4️⃣ Sort leads by latest activity
+  // 4️⃣ Sort leads by latest activity (UNCHANGED LOGIC)
   _allLeads.sort((a, b) {
     final DateTime aTime =
         (_latestCallByLead[a.id]?.finalizedAt ??
@@ -285,10 +291,12 @@ Future<void> _loadLeads() async {
   // 5️⃣ Apply search + filters (IN-MEMORY ONLY)
   _applySearch();
 
-  if (mounted) {
+  // ❗ Only hide loader if NOT background refresh
+  if (mounted && !background) {
     setState(() => _loading = false);
   }
 }
+
 
 
 void _applyDateFilter(String filter) {
@@ -297,16 +305,27 @@ void _applyDateFilter(String filter) {
   setState(() {
     _dateFilter = filter;
 
-    if (filter == '7d') {
+    if (filter == '2d') {
+      _fromDate = now.subtract(const Duration(days: 2));
+    } else if (filter == '7d') {
       _fromDate = now.subtract(const Duration(days: 7));
-      _toDate = now;
     } else if (filter == '30d') {
       _fromDate = now.subtract(const Duration(days: 30));
-      _toDate = now;
     }
+
+    _toDate = now;
   });
 
-  _loadLeads(); // 🔄 reload with new range
+  _loadLeads(); // 🔄 reload calls only when user asks
+}
+
+Future<void> _refreshFast() async {
+  // 🔥 Mark call cache stale
+  CallCache.instance.invalidate();
+
+  await _service.loadLeads();
+  _allLeads = List<Lead>.from(_service.getAll());
+  _applySearch();
 }
 
 
@@ -892,7 +911,7 @@ Future<void> _pickCustomDateRange() async {
             pageBuilder: (_, __, ___) =>
                 LeadFormScreen(lead: lead, autoOpenedFromCall: false),
           ),
-        ).then((_) => _loadLeads()); // refresh when returning
+        ).then((_) => _refreshFast()); // refresh when returning
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
@@ -1063,60 +1082,60 @@ Future<void> _pickCustomDateRange() async {
             const SizedBox(width: 8),
 
             // call + whatsapp buttons, vertical
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  margin: const EdgeInsets.only(left: 8, bottom: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.06),
-                    borderRadius: BorderRadius.circular(14),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color.fromARGB(100, 15, 23, 42),
-                        blurRadius: 18,
-                        offset: Offset(0, 10),
-                      ),
-                    ],
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.phone, size: 20),
-                    color: _successColor.withOpacity(0.9),
-                    padding: const EdgeInsets.all(8),
-                    tooltip:
-                        'Call ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
-                    onPressed: () => _openDialer(lead.phoneNumber),
-                  ),
-                ),
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.06),
-                    borderRadius: BorderRadius.circular(14),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color.fromARGB(100, 15, 23, 42),
-                        blurRadius: 18,
-                        offset: Offset(0, 10),
-                      ),
-                    ],
-                  ),
-                  child: IconButton(
-                    iconSize: 20,
-                    padding: const EdgeInsets.all(8),
-                    tooltip:
-                        'WhatsApp ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
-                    icon: Image.network(
-                      'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
-                      width: 20,
-                      height: 20,
-                      errorBuilder: (_, __, ___) =>
-                          const Icon(Icons.message, size: 20),
-                    ),
-                    onPressed: () => _openWhatsApp(lead.phoneNumber),
-                  ),
-                ),
-              ],
-            ),
+            // Column(
+            //   mainAxisSize: MainAxisSize.min,
+            //   children: [
+            //     Container(
+            //       margin: const EdgeInsets.only(left: 8, bottom: 8),
+            //       decoration: BoxDecoration(
+            //         color: Colors.white.withOpacity(0.06),
+            //         borderRadius: BorderRadius.circular(14),
+            //         boxShadow: const [
+            //           BoxShadow(
+            //             color: Color.fromARGB(100, 15, 23, 42),
+            //             blurRadius: 18,
+            //             offset: Offset(0, 10),
+            //           ),
+            //         ],
+            //       ),
+            //       child: IconButton(
+            //         icon: const Icon(Icons.phone, size: 20),
+            //         color: _successColor.withOpacity(0.9),
+            //         padding: const EdgeInsets.all(8),
+            //         tooltip:
+            //             'Call ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
+            //         onPressed: () => _openDialer(lead.phoneNumber),
+            //       ),
+            //     ),
+            //     Container(
+            //       decoration: BoxDecoration(
+            //         color: Colors.white.withOpacity(0.06),
+            //         borderRadius: BorderRadius.circular(14),
+            //         boxShadow: const [
+            //           BoxShadow(
+            //             color: Color.fromARGB(100, 15, 23, 42),
+            //             blurRadius: 18,
+            //             offset: Offset(0, 10),
+            //           ),
+            //         ],
+            //       ),
+            //       child: IconButton(
+            //         iconSize: 20,
+            //         padding: const EdgeInsets.all(8),
+            //         tooltip:
+            //             'WhatsApp ${lead.name.isEmpty ? lead.phoneNumber : lead.name}',
+            //         icon: Image.network(
+            //           'https://upload.wikimedia.org/wikipedia/commons/5/5e/WhatsApp_icon.png',
+            //           width: 20,
+            //           height: 20,
+            //           errorBuilder: (_, __, ___) =>
+            //               const Icon(Icons.message, size: 20),
+            //         ),
+            //         onPressed: () => _openWhatsApp(lead.phoneNumber),
+            //       ),
+            //     ),
+            //   ],
+            // ),
           ],
         ),
       ),
@@ -1281,7 +1300,7 @@ Future<void> _pickCustomDateRange() async {
                   autoOpenedFromCall: false,
                 ),
               ),
-            ).then((_) => _loadLeads()); // refresh after new lead
+            ).then((_) => _refreshFast()); // refresh after new lead
           },
           child: Container(
             width: 64,
@@ -1424,6 +1443,9 @@ SizedBox(
     scrollDirection: Axis.horizontal,
     padding: const EdgeInsets.symmetric(horizontal: 16),
     children: [
+      _dateChip('Last 2 days', '2d'),
+            const SizedBox(width: 8),
+
       _dateChip('Last 7 days', '7d'),
       const SizedBox(width: 8),
       _dateChip('Last 30 days', '30d'),
@@ -1519,7 +1541,8 @@ SizedBox(
   child: RefreshIndicator(
     color: _accentCyan,
     backgroundColor: _primaryColor,
-    onRefresh: _loadLeads,
+     onRefresh: _refreshFast,
+
     child: ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       children: groupedWidgets,

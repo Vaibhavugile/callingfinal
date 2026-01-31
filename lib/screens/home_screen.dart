@@ -9,6 +9,8 @@ import '../models/lead.dart';
 import 'lead_list_screen.dart';
 import '../call_event_handler.dart';
 import '../widgets/gradient_appbar_title.dart';
+import '../services/call_loader.dart';
+import '../services/call_cache.dart';
 
 class HomeScreen extends StatefulWidget {
   final CallEventHandler callHandler;
@@ -74,15 +76,14 @@ class LatestCall {
 
 class _HomeScreenState extends State<HomeScreen> {
   final LeadService _leadService = LeadService.instance;
-  DateTime _fromDate = DateTime.now().subtract(const Duration(days: 7));
+DateTime _fromDate = DateTime.now().subtract(const Duration(days: 2));
 DateTime _toDate = DateTime.now();
-
-String _dateFilter = '7d'; // '7d', '30d', 'custom'
-
+String _dateFilter = '2d';
 
   bool _loading = true;
   List<Lead> _leads = [];
   String _tenantId = '';
+Timer? _cacheTimer;
 
   // For call-log sync progress
   bool _syncing = false;
@@ -107,91 +108,44 @@ StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _callSub;
   final Color _accentRed = const Color(0xFFEF4444);
   final Color _mutedText = const Color(0xFF94A3B8);
 
-  @override
-  void initState() {
-    super.initState();
-    _loadTenantAndLeads();
-  }
-  @override
+
+@override
+void initState() {
+  super.initState();
+
+  // Initial load
+  _loadTenantAndLeads();
+
+  // 🔄 Soft auto-invalidate every 30s (does NOT hit Firestore)
+
+}
+
+@override
 void dispose() {
+  // Clean up timer
+
+  // Existing cleanup
   _callSub?.cancel();
+
   super.dispose();
 }
 
 
 Future<void> _loadCallStatsOnce() async {
-  if (_tenantId.isEmpty) {
-    print("⚠️ _loadCallStatsOnce skipped: tenantId empty");
-    return;
-  }
+  if (_tenantId.isEmpty) return;
 
   try {
-    final fromTs = Timestamp.fromDate(_fromDate);
-    final toTs = Timestamp.fromDate(_toDate);
-
-    print("📅 Loading call stats");
-    print("   Tenant: $_tenantId");
-    print("   From: $_fromDate");
-    print("   To:   $_toDate");
+    final calls = await loadLatestCalls(
+      tenantId: _tenantId,
+      from: _fromDate,
+      to: _toDate,
+    );
 
     int missed = 0;
     int rejected = 0;
     int answered = 0;
 
-    // phoneNumber → latest call (within date range)
-    final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>> latestByPhone =
-        {};
-
-    QueryDocumentSnapshot<Map<String, dynamic>>? lastDoc;
-    bool reachedOldData = false;
-    int totalFetched = 0;
-
-    while (!reachedOldData) {
-      Query<Map<String, dynamic>> query = FirebaseFirestore.instance
-          .collectionGroup('calls')
-          // ORDER BY MUST COME FIRST
-          .orderBy('createdAt', descending: true)
-          .where('tenantId', isEqualTo: _tenantId)
-          .where('createdAt', isLessThanOrEqualTo: toTs)
-          .limit(400);
-
-      if (lastDoc != null) {
-        query = query.startAfterDocument(lastDoc);
-      }
-
-      final snap = await query.get();
-      if (snap.docs.isEmpty) break;
-
-      totalFetched += snap.docs.length;
-
-      for (final doc in snap.docs) {
-        final data = doc.data();
-        final createdAt = data['createdAt'] as Timestamp?;
-
-        if (createdAt == null) continue;
-
-        // ⛔ Stop once we go older than FROM date
-        if (createdAt.compareTo(fromTs) < 0) {
-          reachedOldData = true;
-          break;
-        }
-
-        final phone = data['phoneNumber'] as String?;
-        if (phone == null || phone.isEmpty) continue;
-
-        // because ordered DESC, first hit is latest
-        latestByPhone.putIfAbsent(phone, () => doc);
-      }
-
-      lastDoc = snap.docs.last;
-    }
-
-    print("📊 Total call docs scanned: $totalFetched");
-    print("📞 Unique phones considered: ${latestByPhone.length}");
-
-    // ---- Calculate stats from latest call per phone ----
-    for (final doc in latestByPhone.values) {
-      final data = doc.data();
+    for (final data in calls.values) {
       final dir = (data['direction'] as String?)?.toLowerCase();
       final dur = (data['durationInSeconds'] as num?)?.toInt() ?? 0;
       final outcome = (data['finalOutcome'] as String?)?.toLowerCase();
@@ -213,28 +167,194 @@ Future<void> _loadCallStatsOnce() async {
       _rejectedCount = rejected;
       _answeredCount = answered;
     });
-
-    print(
-      "✅ Stats updated → missed=$missed, rejected=$rejected, answered=$answered",
-    );
   } catch (e, st) {
-    print("❌ _loadCallStatsOnce ERROR: $e");
+    print('❌ loadCallStats error: $e');
     print(st);
-
-    if (!mounted) return;
-
-    // Fail safely — NEVER black screen
-    setState(() {
-      _missedCount = 0;
-      _rejectedCount = 0;
-      _answeredCount = 0;
-    });
   }
+}
+Future<void> _confirmPasswordAndFix() async {
+  final TextEditingController pwdCtrl = TextEditingController();
+  bool wrongPassword = false;
+
+  await showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) {
+      return StatefulBuilder(
+        builder: (ctx, setLocalState) {
+          return AlertDialog(
+            backgroundColor: _primaryColor,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: const Text(
+              "Confirm Action",
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  "Enter admin password to remove ALL missed / rejected calls.",
+                  style: TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: pwdCtrl,
+                  obscureText: true,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: "Password",
+                    hintStyle: const TextStyle(color: Colors.white38),
+                    errorText:
+                        wrongPassword ? "Incorrect password" : null,
+                    enabledBorder: OutlineInputBorder(
+                      borderSide: BorderSide(
+                        color: Colors.white.withOpacity(0.2),
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderSide:
+                          const BorderSide(color: Colors.cyanAccent),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("Cancel"),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                ),
+                onPressed: () {
+                  const adminPassword = "Reddy@7777";
+
+                  if (pwdCtrl.text == adminPassword) {
+                    // Close password dialog
+                    Navigator.pop(ctx);
+
+                    // 🔴 SHOW BLOCKING PROGRESS IMMEDIATELY
+                    showDialog(
+                      context: context,
+                      barrierDismissible: false,
+                      builder: (_) => AlertDialog(
+                        backgroundColor: _primaryColor,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        content: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            CircularProgressIndicator(
+                              valueColor: AlwaysStoppedAnimation(
+                                Colors.cyanAccent,
+                              ),
+                            ),
+                            SizedBox(height: 16),
+                            Text(
+                              "Removing missed / rejected calls...\nPlease wait",
+                              style: TextStyle(color: Colors.white),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+
+                    // 🔥 START FIREBASE FIX
+                    _fixAllZeroDurationCallsAllTime();
+                  } else {
+                    setLocalState(() => wrongPassword = true);
+                  }
+                },
+                child: const Text("Confirm"),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
 }
 
 
 
 
+
+
+
+Future<void> _fixAllZeroDurationCallsAllTime() async {
+  if (_tenantId.isEmpty) return;
+
+  setState(() => _syncing = true);
+
+  try {
+    const int batchLimit = 400;
+    int totalUpdated = 0;
+    QueryDocumentSnapshot<Map<String, dynamic>>? lastDoc;
+
+    while (true) {
+      Query<Map<String, dynamic>> query = FirebaseFirestore.instance
+          .collectionGroup('calls')
+          .where('tenantId', isEqualTo: _tenantId)
+          .where('durationInSeconds', isEqualTo: 0)
+          .orderBy('createdAt', descending: true)
+          .limit(batchLimit);
+
+      if (lastDoc != null) {
+        query = query.startAfterDocument(lastDoc);
+      }
+
+      final snap = await query.get();
+      if (snap.docs.isEmpty) break;
+
+      final batch = FirebaseFirestore.instance.batch();
+
+      for (final doc in snap.docs) {
+        batch.update(doc.reference, {
+          'durationInSeconds': 1,
+          'finalOutcome': 'answered',
+        });
+        totalUpdated++;
+      }
+
+      await batch.commit();
+      lastDoc = snap.docs.last;
+    }
+
+    // 🔄 IMPORTANT: clear cache AFTER Firebase mutation
+    CallCache.instance.clear();
+
+    // 🔄 reload dashboard stats
+    await _loadCallStatsOnce();
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          totalUpdated == 0
+              ? "No missed/rejected calls found."
+              : "Fixed $totalUpdated calls (all time).",
+        ),
+      ),
+    );
+  } catch (e, st) {
+    FirebaseCrashlytics.instance.recordError(e, st);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("Failed to update calls in Firebase.")),
+    );
+  } finally {
+    if (mounted) setState(() => _syncing = false);
+  }
+}
 
 
   Future<void> _loadTenantAndLeads() async {
@@ -286,16 +406,18 @@ await _loadCallStatsOnce();
   void _applyDateFilter(String filter) {
   final now = DateTime.now();
 
-  setState(() {
+   setState(() {
     _dateFilter = filter;
 
-    if (filter == '7d') {
+    if (filter == '2d') {
+      _fromDate = now.subtract(const Duration(days: 2));
+    } else if (filter == '7d') {
       _fromDate = now.subtract(const Duration(days: 7));
-      _toDate = now;
     } else if (filter == '30d') {
       _fromDate = now.subtract(const Duration(days: 30));
-      _toDate = now;
     }
+
+    _toDate = now;
   });
 
   _loadCallStatsOnce(); // 🔄 reload stats
@@ -562,7 +684,7 @@ Widget _dateChip(String label, String value) {
 
   try {
     await action();
-
+  CallCache.instance.invalidate();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -646,6 +768,7 @@ Widget _dateChip(String label, String value) {
                     color: Colors.white,
                   ),
                 ),
+
                 const SizedBox(height: 4),
                 Text(
                   "Choose which calls you want to sync.",
@@ -720,6 +843,23 @@ Widget _dateChip(String label, String value) {
                     },
                   ),
                 ),
+                ElevatedButton.icon(
+  style: ElevatedButton.styleFrom(
+    backgroundColor: Colors.deepOrange,
+    foregroundColor: Colors.white,
+    padding: const EdgeInsets.all(14),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(12),
+    ),
+  ),
+  icon: const Icon(Icons.cleaning_services),
+  label: const Text(
+    "Remove ALL Missed / Rejected (All Time)",
+    style: TextStyle(fontSize: 15),
+  ),
+  onPressed: _confirmPasswordAndFix, // method comes later
+),
+
                 const SizedBox(height: 8),
               ],
             ),
@@ -852,7 +992,11 @@ final rejectedCount = _rejectedCount;
                 ),
               ),
               child: RefreshIndicator(
-                onRefresh: _loadTenantAndLeads,
+                onRefresh: () async {
+  CallCache.instance.invalidate();
+  await _loadTenantAndLeads();
+},
+
                 child: SingleChildScrollView(
                   physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.all(16),
@@ -892,6 +1036,8 @@ SizedBox(
   child: ListView(
     scrollDirection: Axis.horizontal,
     children: [
+      _dateChip('Last 2 days', '2d'),
+      const SizedBox(width: 8),
       _dateChip('Last 7 Days', '7d'),
       const SizedBox(width: 8),
       _dateChip('Last 30 Days', '30d'),
@@ -1039,6 +1185,7 @@ SizedBox(
                       ),
 
                       const SizedBox(height: 20),
+
 
                       SizedBox(
                         width: double.infinity,
