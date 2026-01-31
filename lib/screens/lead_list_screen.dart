@@ -117,6 +117,10 @@ class _LeadListScreenState extends State<LeadListScreen>
     with TickerProviderStateMixin {
   // Use singleton so cache is shared
   final LeadService _service = LeadService.instance;
+DateTime _fromDate = DateTime.now().subtract(const Duration(days: 7));
+DateTime _toDate = DateTime.now();
+String _dateFilter = '7d'; // '7d', '30d', 'custom'
+
 
   List<Lead> _allLeads = [];
   List<Lead> _filteredLeads = [];
@@ -195,43 +199,63 @@ Future<void> _loadLeads() async {
   await _service.loadLeads();
   _allLeads = List<Lead>.from(_service.getAll());
 
-  // 2️⃣ Load ALL calls once (like HomeScreen)
+  // 2️⃣ Load calls (PAGINATED & DATE-BOUND)
   final prefs = await SharedPreferences.getInstance();
   final tenantId = prefs.getString('tenantId') ?? 'default_tenant';
 
-  final callSnap = await FirebaseFirestore.instance
-      .collectionGroup('calls')
-      .where('tenantId', isEqualTo: tenantId)
-      .get();
+  final Timestamp fromTs = Timestamp.fromDate(_fromDate);
+  final Timestamp toTs = Timestamp.fromDate(_toDate);
 
-  // 3️⃣ Normalize calls → latest call per PHONE NUMBER
   final Map<String, LatestCall> latestByPhone = {};
 
-  for (final doc in callSnap.docs) {
-    final call = LatestCall.fromDoc(doc);
+  QueryDocumentSnapshot<Map<String, dynamic>>? lastDoc;
+  bool reachedOldData = false;
+  int totalFetched = 0;
 
-    final phone = call.phoneNumber;
-    if (phone == null || phone.isEmpty) continue;
+  while (!reachedOldData) {
+    Query<Map<String, dynamic>> query = FirebaseFirestore.instance
+        .collectionGroup('calls')
+        .orderBy('createdAt', descending: true)
+        .where('tenantId', isEqualTo: tenantId)
+        .where('createdAt', isLessThanOrEqualTo: toTs)
+        .limit(400);
 
-    final callTime = call.finalizedAt ?? call.createdAt;
-    if (callTime == null) continue;
-
-    final existing = latestByPhone[phone];
-    if (existing == null) {
-      latestByPhone[phone] = call;
-    } else {
-      final existingTime =
-          existing.finalizedAt ??
-          existing.createdAt ??
-          DateTime.fromMillisecondsSinceEpoch(0);
-
-      if (callTime.isAfter(existingTime)) {
-        latestByPhone[phone] = call;
-      }
+    if (lastDoc != null) {
+      query = query.startAfterDocument(lastDoc);
     }
+
+    final snap = await query.get();
+    if (snap.docs.isEmpty) break;
+
+    totalFetched += snap.docs.length;
+
+    for (final doc in snap.docs) {
+      final call = LatestCall.fromDoc(doc);
+      final DateTime? createdAt = call.createdAt;
+
+      if (createdAt == null) continue;
+
+      // ⛔ STOP pagination once outside date range
+      // MUST match orderBy field (createdAt)
+      if (createdAt.isBefore(_fromDate)) {
+        reachedOldData = true;
+        break;
+      }
+
+      final phone = call.phoneNumber;
+      if (phone == null || phone.isEmpty) continue;
+
+      // Ordered DESC → first occurrence is latest
+      latestByPhone.putIfAbsent(phone, () => call);
+    }
+
+    lastDoc = snap.docs.last;
   }
 
-  // 4️⃣ Attach latest call to leads using phoneNumber
+  debugPrint("📊 LeadList calls scanned: $totalFetched");
+  debugPrint("📞 Phones with latest calls: ${latestByPhone.length}");
+
+  // 3️⃣ Attach latest call to leads
   _latestCallByLead.clear();
 
   for (final lead in _allLeads) {
@@ -241,15 +265,15 @@ Future<void> _loadLeads() async {
     }
   }
 
-  // 5️⃣ Sort leads by latest activity (call → fallback)
+  // 4️⃣ Sort leads by latest activity
   _allLeads.sort((a, b) {
-    final aTime =
+    final DateTime aTime =
         (_latestCallByLead[a.id]?.finalizedAt ??
                 _latestCallByLead[a.id]?.createdAt) ??
             a.lastInteraction ??
             DateTime.fromMillisecondsSinceEpoch(0);
 
-    final bTime =
+    final DateTime bTime =
         (_latestCallByLead[b.id]?.finalizedAt ??
                 _latestCallByLead[b.id]?.createdAt) ??
             b.lastInteraction ??
@@ -258,7 +282,7 @@ Future<void> _loadLeads() async {
     return bTime.compareTo(aTime);
   });
 
-  // 6️⃣ Apply filters
+  // 5️⃣ Apply search + filters (IN-MEMORY ONLY)
   _applySearch();
 
   if (mounted) {
@@ -266,6 +290,24 @@ Future<void> _loadLeads() async {
   }
 }
 
+
+void _applyDateFilter(String filter) {
+  final now = DateTime.now();
+
+  setState(() {
+    _dateFilter = filter;
+
+    if (filter == '7d') {
+      _fromDate = now.subtract(const Duration(days: 7));
+      _toDate = now;
+    } else if (filter == '30d') {
+      _fromDate = now.subtract(const Duration(days: 30));
+      _toDate = now;
+    }
+  });
+
+  _loadLeads(); // 🔄 reload with new range
+}
 
 
   // ---------------------------------------------------------------------------
@@ -523,6 +565,58 @@ Future<void> _loadLeads() async {
 
     return widgets;
   }
+  Widget _dateChip(String label, String value) {
+  final bool isSelected = _dateFilter == value;
+
+  return GestureDetector(
+    onTap: () async {
+      if (value == 'custom') {
+        await _pickCustomDateRange();
+      } else {
+        _applyDateFilter(value);
+      }
+    },
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: isSelected
+            ? _accentCyan
+            : Colors.white.withOpacity(0.08),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          color: isSelected ? Colors.black : Colors.white,
+        ),
+      ),
+    ),
+  );
+}
+Future<void> _pickCustomDateRange() async {
+  final picked = await showDateRangePicker(
+    context: context,
+    firstDate: DateTime.now().subtract(const Duration(days: 365)),
+    lastDate: DateTime.now(),
+    initialDateRange: DateTimeRange(
+      start: _fromDate,
+      end: _toDate,
+    ),
+  );
+
+  if (picked == null) return;
+
+  setState(() {
+    _dateFilter = 'custom';
+    _fromDate = picked.start;
+    _toDate = picked.end;
+  });
+
+  _loadLeads();
+}
+
 
   // ---------------------------------------------------------------------------
   // PHONE HELPERS
@@ -1324,6 +1418,24 @@ Future<void> _loadLeads() async {
                   ),
 
                   const SizedBox(height: 12),
+SizedBox(
+  height: 42,
+  child: ListView(
+    scrollDirection: Axis.horizontal,
+    padding: const EdgeInsets.symmetric(horizontal: 16),
+    children: [
+      _dateChip('Last 7 days', '7d'),
+      const SizedBox(width: 8),
+      _dateChip('Last 30 days', '30d'),
+      const SizedBox(width: 8),
+      _dateChip('Custom', 'custom'),
+    ],
+  ),
+),
+
+                  const SizedBox(height: 12),
+
+
 
                   // FILTER CHIPS
                   // FILTER CHIPS

@@ -74,6 +74,11 @@ class LatestCall {
 
 class _HomeScreenState extends State<HomeScreen> {
   final LeadService _leadService = LeadService.instance;
+  DateTime _fromDate = DateTime.now().subtract(const Duration(days: 7));
+DateTime _toDate = DateTime.now();
+
+String _dateFilter = '7d'; // '7d', '30d', 'custom'
+
 
   bool _loading = true;
   List<Lead> _leads = [];
@@ -114,87 +119,121 @@ void dispose() {
 }
 
 
-void _listenToCalls() {
-  if (_tenantId.isEmpty) return;
+Future<void> _loadCallStatsOnce() async {
+  if (_tenantId.isEmpty) {
+    print("⚠️ _loadCallStatsOnce skipped: tenantId empty");
+    return;
+  }
 
-  _callSub?.cancel();
+  try {
+    final fromTs = Timestamp.fromDate(_fromDate);
+    final toTs = Timestamp.fromDate(_toDate);
 
-  _callSub = FirebaseFirestore.instance
-      .collectionGroup('calls')
-      .where('tenantId', isEqualTo: _tenantId)
-      .snapshots()
-      .listen((snapshot) {
-    if (!mounted) return;
-
-    // Map phoneNumber -> latest call doc
-    final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>> latestByPhone =
-        {};
-
-    for (final doc in snapshot.docs) {
-      final data = doc.data();
-
-      final phone = data['phoneNumber'] as String?;
-      final createdAt = data['createdAt'];
-
-      if (phone == null || createdAt == null) continue;
-
-      final DateTime createdTime = createdAt is Timestamp
-          ? createdAt.toDate()
-          : DateTime.tryParse(createdAt.toString()) ??
-              DateTime.fromMillisecondsSinceEpoch(0);
-
-      final existing = latestByPhone[phone];
-
-      if (existing == null) {
-        latestByPhone[phone] = doc;
-      } else {
-        final existingTime =
-            (existing.data()['createdAt'] as Timestamp).toDate();
-        if (createdTime.isAfter(existingTime)) {
-          latestByPhone[phone] = doc;
-        }
-      }
-    }
+    print("📅 Loading call stats");
+    print("   Tenant: $_tenantId");
+    print("   From: $_fromDate");
+    print("   To:   $_toDate");
 
     int missed = 0;
     int rejected = 0;
     int answered = 0;
 
+    // phoneNumber → latest call (within date range)
+    final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>> latestByPhone =
+        {};
+
+    QueryDocumentSnapshot<Map<String, dynamic>>? lastDoc;
+    bool reachedOldData = false;
+    int totalFetched = 0;
+
+    while (!reachedOldData) {
+      Query<Map<String, dynamic>> query = FirebaseFirestore.instance
+          .collectionGroup('calls')
+          // ORDER BY MUST COME FIRST
+          .orderBy('createdAt', descending: true)
+          .where('tenantId', isEqualTo: _tenantId)
+          .where('createdAt', isLessThanOrEqualTo: toTs)
+          .limit(400);
+
+      if (lastDoc != null) {
+        query = query.startAfterDocument(lastDoc);
+      }
+
+      final snap = await query.get();
+      if (snap.docs.isEmpty) break;
+
+      totalFetched += snap.docs.length;
+
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        final createdAt = data['createdAt'] as Timestamp?;
+
+        if (createdAt == null) continue;
+
+        // ⛔ Stop once we go older than FROM date
+        if (createdAt.compareTo(fromTs) < 0) {
+          reachedOldData = true;
+          break;
+        }
+
+        final phone = data['phoneNumber'] as String?;
+        if (phone == null || phone.isEmpty) continue;
+
+        // because ordered DESC, first hit is latest
+        latestByPhone.putIfAbsent(phone, () => doc);
+      }
+
+      lastDoc = snap.docs.last;
+    }
+
+    print("📊 Total call docs scanned: $totalFetched");
+    print("📞 Unique phones considered: ${latestByPhone.length}");
+
+    // ---- Calculate stats from latest call per phone ----
     for (final doc in latestByPhone.values) {
       final data = doc.data();
-
       final dir = (data['direction'] as String?)?.toLowerCase();
       final dur = (data['durationInSeconds'] as num?)?.toInt() ?? 0;
       final outcome = (data['finalOutcome'] as String?)?.toLowerCase();
 
-      // MISSED
       if ((dir == 'inbound' && dur == 0) || outcome == 'missed') {
         missed++;
-      }
-      // REJECTED
-      else if (dir == 'outbound' &&
+      } else if (dir == 'outbound' &&
           (dur == 0 || outcome == 'rejected')) {
         rejected++;
-      }
-      // ANSWERED
-      else if (dur > 0) {
+      } else if (dur > 0) {
         answered++;
       }
     }
 
-    if (_missedCount == missed &&
-        _rejectedCount == rejected &&
-        _answeredCount == answered) {
-      return;
-    }
+    if (!mounted) return;
 
     setState(() {
       _missedCount = missed;
       _rejectedCount = rejected;
       _answeredCount = answered;
     });
-  });
+
+    print(
+      "✅ Stats updated → missed=$missed, rejected=$rejected, answered=$answered",
+    );
+  } catch (e, st) {
+    print("❌ _loadCallStatsOnce ERROR: $e");
+    print(st);
+
+    if (!mounted) return;
+
+    // Fail safely — NEVER black screen
+    setState(() {
+      _missedCount = 0;
+      _rejectedCount = 0;
+      _answeredCount = 0;
+    });
+  }
 }
+
+
+
 
 
 
@@ -204,7 +243,8 @@ void _listenToCalls() {
     // Load tenantId
     final prefs = await SharedPreferences.getInstance();
     _tenantId = prefs.getString('tenantId') ?? '';
-_listenToCalls();
+await _loadCallStatsOnce();
+
 
     print("🏷 Loaded tenantId in HomeScreen: $_tenantId");
 
@@ -242,6 +282,76 @@ _listenToCalls();
       return null;
     }
   }
+
+  void _applyDateFilter(String filter) {
+  final now = DateTime.now();
+
+  setState(() {
+    _dateFilter = filter;
+
+    if (filter == '7d') {
+      _fromDate = now.subtract(const Duration(days: 7));
+      _toDate = now;
+    } else if (filter == '30d') {
+      _fromDate = now.subtract(const Duration(days: 30));
+      _toDate = now;
+    }
+  });
+
+  _loadCallStatsOnce(); // 🔄 reload stats
+}
+Future<void> _pickCustomDateRange() async {
+  final picked = await showDateRangePicker(
+    context: context,
+    firstDate: DateTime.now().subtract(const Duration(days: 365)),
+    lastDate: DateTime.now(),
+    initialDateRange: DateTimeRange(
+      start: _fromDate,
+      end: _toDate,
+    ),
+  );
+
+  if (picked == null) return;
+
+  setState(() {
+    _dateFilter = 'custom';
+    _fromDate = picked.start;
+    _toDate = picked.end;
+  });
+
+  _loadCallStatsOnce();
+}
+Widget _dateChip(String label, String value) {
+  final bool isSelected = _dateFilter == value;
+
+  return GestureDetector(
+    onTap: () {
+      if (value == 'custom') {
+        _pickCustomDateRange();
+      } else {
+        _applyDateFilter(value);
+      }
+    },
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: isSelected
+            ? Colors.cyanAccent
+            : Colors.white.withOpacity(0.08),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          color: isSelected ? Colors.black : Colors.white,
+        ),
+      ),
+    ),
+  );
+}
+
 
   /// Load latest calls in small batches
   // Future<void> _loadLatestCallsForLeads() async {
@@ -429,17 +539,14 @@ _listenToCalls();
     );
   }
 
-  void _openLeadListWithFilter(String filter) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => LeadListScreen(initialFilter: filter),
-      ),
-    ).then((_) {
-      // Reload dashboard when coming back from list
-      _loadTenantAndLeads();
-    });
-  }
+ void _openLeadListWithFilter(String filter) {
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => LeadListScreen(initialFilter: filter),
+    ),
+  );
+}
 
   /// Generic runner for call-log sync with nice progress UI
   Future<void> _runFixFromCallLog({
@@ -754,18 +861,20 @@ final rejectedCount = _rejectedCount;
                     children: [
                       _tenantBadge(),
 
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text(
-                            "Dashboard",
-                            style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                            ),
-                          ),
-                          Text(
+                    // DASHBOARD TITLE
+const Text(
+  "Dashboard",
+  style: TextStyle(
+    fontSize: 22,
+    fontWeight: FontWeight.bold,
+    color: Colors.white,
+  ),
+),
+
+const SizedBox(height: 6),
+
+// TOTAL LEADS
+Text(
   _loading
       ? "Loading dashboard..."
       : "Total: $totalLeads leads",
@@ -775,8 +884,23 @@ final rejectedCount = _rejectedCount;
   ),
 ),
 
-                        ],
-                      ),
+const SizedBox(height: 12),
+
+// DATE FILTER CHIPS (SAFE)
+SizedBox(
+  height: 42,
+  child: ListView(
+    scrollDirection: Axis.horizontal,
+    children: [
+      _dateChip('Last 7 Days', '7d'),
+      const SizedBox(width: 8),
+      _dateChip('Last 30 Days', '30d'),
+      const SizedBox(width: 8),
+      _dateChip('Custom', 'custom'),
+    ],
+  ),
+),
+
                       const SizedBox(height: 10),
 
                       // 2 cards per row, all clickable
