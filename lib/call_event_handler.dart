@@ -30,6 +30,8 @@ class CallEventHandler {
   final LeadService _leadService = LeadService.instance;
 
   StreamSubscription? _subscription;
+  bool _methodHandlerAttached = false;
+
 
   /// Prevents multiple screens from opening
   bool _screenOpen = false;
@@ -53,9 +55,16 @@ class CallEventHandler {
   // START LISTENING & CLEANUP
   // --------------------------------------------------------------------------
   void startListening() {
-    print("📞 [CALL HANDLER] START LISTENING");
+  // 🛑 STEP 2: Prevent duplicate stream subscriptions
+  if (_subscription != null) {
+    print("⚠️ [CALL HANDLER] already listening — skipping");
+    return;
+  }
 
-    // Setup MethodChannel handler so native can request opening a lead by phone.
+  print("📞 [CALL HANDLER] START LISTENING");
+
+  // 🛑 STEP 3: Attach MethodChannel handler ONLY ONCE
+  if (!_methodHandlerAttached) {
     _openLeadChannel.setMethodCallHandler((call) async {
       try {
         if (call.method == 'openLeadByPhone') {
@@ -73,7 +82,8 @@ class CallEventHandler {
             print('📣 openLeadByPhone invoked for phone=$phone tenant=$tenant');
 
             // Find or create the lead and open UI
-            final Lead lead = await _leadService.findOrCreateLead(phone: phone);
+            final Lead lead =
+                await _leadService.findOrCreateLead(phone: phone);
             _openLeadUI(lead);
           } else {
             print('⚠️ openLeadByPhone called with empty phone: $args');
@@ -84,32 +94,40 @@ class CallEventHandler {
       }
     });
 
-    _subscription = _eventChannel
-        .receiveBroadcastStream()
-        .listen(
-      (event) {
-        try {
-          final Map<String, dynamic> typedEvent =
-              Map<String, dynamic>.from(event as Map);
-          _processCallEvent(typedEvent);
-        } catch (e, st) {
-          print('❌ Received non-map event or parsing error: $e\n$st');
-        }
-      },
-      onError: (error) {
-        print("❌ STREAM ERROR: $error");
-      },
-      onDone: () {
-        print("✅ STREAM DONE");
-      },
-    );
+    _methodHandlerAttached = true;
   }
 
-  void stopListening() {
-    _subscription?.cancel();
-    _subscription = null;
-    print("🛑 [CALL HANDLER] STOP LISTENING");
-  }
+  // 📡 EventChannel subscription (ONLY ONE)
+  _subscription = _eventChannel
+      .receiveBroadcastStream()
+      .listen(
+    (event) {
+      try {
+        final Map<String, dynamic> typedEvent =
+            Map<String, dynamic>.from(event as Map);
+        _processCallEvent(typedEvent);
+      } catch (e, st) {
+        print('❌ Received non-map event or parsing error: $e\n$st');
+      }
+    },
+    onError: (error) {
+      print("❌ STREAM ERROR: $error");
+    },
+    onDone: () {
+      print("✅ STREAM DONE");
+    },
+  );
+}
+
+
+void stopListening() {
+  if (_subscription == null) return;
+
+  _subscription?.cancel();
+  _subscription = null;
+  print("🛑 [CALL HANDLER] STOP LISTENING");
+}
+
 
   void dispose() {
     stopListening();
